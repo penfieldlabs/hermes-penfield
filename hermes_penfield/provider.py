@@ -162,7 +162,7 @@ class PenfieldMemoryProvider:
             from hermes_penfield.config import resolve_environment
 
             cfg.env = resolve_environment(str(values["penfield_env"]))
-            cfg._apply_hosts()
+            cfg.reapply_hosts()
         if values.get("penfield_url"):
             cfg.api_base = str(values["penfield_url"]).rstrip("/")
         cfg.save(hermes_home)

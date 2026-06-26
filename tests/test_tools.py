@@ -166,6 +166,27 @@ class TestConnect:
                 },
             )
 
+    def test_inverse_paired_succeeds_with_inverse_type(self) -> None:
+        # Regression: previously inverse_type wasn't in the schema or the
+        # copy loop, so INVERSE_PAIRED *always* errored — the field was
+        # unreachable. Now it must flow through to the body.
+        c = _RecordingClient()
+        dispatch(
+            c,
+            "penfield_connect",
+            {
+                "from_id": "a",
+                "to_id": "b",
+                "relationship_type": "parent_of",
+                "direction_type": "INVERSE_PAIRED",
+                "inverse_type": "child_of",
+            },
+        )
+        name, body, _ = c.calls[0]
+        assert name == "relationship_create"
+        assert body["direction_type"] == "INVERSE_PAIRED"
+        assert body["inverse_type"] == "child_of"
+
 
 class TestMutations:
     def test_update_puts_id_in_path(self) -> None:

@@ -105,7 +105,10 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "importance_threshold": {"type": "number", "minimum": 0, "maximum": 1},
                 "enable_graph_expansion": {"type": "boolean"},
                 "graph_max_depth": {"type": "integer", "minimum": 1, "maximum": 5},
-                "tags": {"type": "string"},
+                "tags": {
+                    "type": "string",
+                    "description": "comma-separated, OR logic (API filter shape)",
+                },
                 "start_date": {"type": "string"},
                 "end_date": {"type": "string"},
             },
@@ -130,6 +133,11 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
                     **_enum_str(RELATIONSHIP_TYPES),
                 },
                 "direction_type": {"type": "string", **_enum_str(DIRECTION_TYPES)},
+                "inverse_type": {
+                    "type": "string",
+                    "description": "required when direction_type is INVERSE_PAIRED",
+                    **_enum_str(RELATIONSHIP_TYPES),
+                },
                 "strength": {"type": "number", "minimum": 0, "maximum": 1},
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "evidence": {"type": "object"},
@@ -398,10 +406,10 @@ def _connect(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
         "to_id": args["to_id"],
         "relationship_type": rtype,
     }
-    for key in ("direction_type", "strength", "confidence", "evidence"):
+    for key in ("direction_type", "inverse_type", "strength", "confidence", "evidence"):
         if key in args and args[key] is not None:
             body[key] = args[key]
-    if body.get("direction_type") == "INVERSE_PAIRED" and not args.get("inverse_type"):
+    if body.get("direction_type") == "INVERSE_PAIRED" and not body.get("inverse_type"):
         raise ValueError("direction_type INVERSE_PAIRED requires inverse_type")
     return client.call("relationship_create", body=body)
 

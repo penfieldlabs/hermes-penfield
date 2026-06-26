@@ -28,32 +28,17 @@ if TYPE_CHECKING:
 def register_cli(subparser: argparse._SubParsersAction) -> None:
     """Register ``hermes penfield <subcommand>`` handlers.
 
+    Nests commands under a ``penfield`` group, as Hermes expects. The
+    command definitions themselves live in :func:`_add_commands` so the
+    Hermes path and the standalone :func:`main` path cannot drift.
+
     Args:
         subparser: The argparse subparsers object Hermes passes in.
     """
     penfield = subparser.add_parser("penfield", help="Penfield memory provider commands")
     penfield.set_defaults(_penfield_cli=True)
     sub = penfield.add_subparsers(dest="penfield_command", required=True)
-
-    p = sub.add_parser("status", help="Show connection status and memory count")
-    p.add_argument("--hermes-home", default="")
-
-    p = sub.add_parser("login", help="Run interactive OAuth device-code login")
-    p.add_argument("--hermes-home", default="")
-    p.add_argument("--client-id", default=None)
-
-    p = sub.add_parser("logout", help="Clear cached tokens")
-    p.add_argument("--hermes-home", default="")
-
-    p = sub.add_parser("search", help="Quick semantic search from the CLI")
-    p.add_argument("query", nargs=argparse.REMAINDER)
-    p.add_argument("--hermes-home", default="")
-    p.add_argument("--limit", type=int, default=10)
-
-    p = sub.add_parser("stats", help="Show memory/relationship/storage stats")
-    p.add_argument("--hermes-home", default="")
-
-    p = sub.add_parser("version", help="Print the plugin version")
+    _add_commands(sub)
 
 
 def _build_config_and_client(hermes_home: str) -> tuple[PenfieldConfig, PenfieldClient]:
@@ -64,13 +49,20 @@ def _build_config_and_client(hermes_home: str) -> tuple[PenfieldConfig, Penfield
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    cfg, _ = _build_config_and_client(getattr(args, "hermes_home", ""))
+    cfg, client = _build_config_and_client(getattr(args, "hermes_home", ""))
     print(f"hermes-penfield {__version__}")
     print(f"environment: {cfg.env.value}")
     print(f"api_base: {cfg.api_base}")
     print(f"api_key set: {'yes' if cfg.api_key else 'no'}")
     auth = PenfieldAuth(cfg, getattr(args, "hermes_home", "") or None)
     print(f"authenticated: {'yes' if auth.is_authenticated() else 'no'}")
+    # The help text promises a memory count, so actually fetch it.
+    # Non-fatal: if the tenant is unreachable, report that rather than fail.
+    try:
+        stats = client.call("search_stats")
+        print(f"memory count: {stats.get('total_memories', '?')}")
+    except PenfieldError as exc:
+        print(f"memory count: unavailable ({exc})")
     return 0
 
 
@@ -110,8 +102,10 @@ def cmd_search(args: argparse.Namespace) -> int:
     parsed = json.loads(result)
     for it in parsed.get("items", []):
         score = it.get("score")
+        # score may be None on some results; guard the format.
+        score_str = f"{score:.3f}" if isinstance(score, (int, float)) else "  -  "
         snippet = it.get("snippet", "")
-        print(f"[{score:.3f}] {snippet}")
+        print(f"[{score_str}] {snippet}")
     return 0
 
 
@@ -161,8 +155,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _register_commands(sub: Any) -> None:
-    """Register command subparsers directly under a subparsers action."""
-    p = sub.add_parser("status", help="Show connection status and memory count")
+    """Register command subparsers directly (standalone path).
+
+    Thin wrapper over :func:`_add_commands`; kept as a named entry point
+    so :func:`main` reads cleanly.
+    """
+    _add_commands(sub)
+
+
+def _add_commands(sub: Any) -> None:
+    """Define the penfield subcommands on a subparsers action.
+
+    Single source of truth for command definitions — both the Hermes
+    path (:func:`register_cli`, nested under ``penfield``) and the
+    standalone path (:func:`main`, flat) call this so they can't drift.
+    """
+    p = sub.add_parser("status", help="Show connection status")
     p.add_argument("--hermes-home", default="")
 
     p = sub.add_parser("login", help="Run interactive OAuth device-code login")

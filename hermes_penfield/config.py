@@ -98,7 +98,7 @@ class PenfieldConfig:
     def __post_init__(self) -> None:
         """Derive default host URLs after dataclass init."""
         if not self.api_base:
-            self._apply_hosts()
+            self.reapply_hosts()
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -152,7 +152,7 @@ class PenfieldConfig:
         if override:
             instance.api_base = override.rstrip("/")
         else:
-            instance._apply_hosts()
+            instance.reapply_hosts()
 
         # API key
         key = (
@@ -196,7 +196,13 @@ class PenfieldConfig:
         instance.extra = {k: v for k, v in saved.items() if k not in known}
         return instance
 
-    def _apply_hosts(self) -> None:
+    def reapply_hosts(self) -> None:
+        """Re-derive api/auth/portal/mcp URLs from the current environment.
+
+        Call this after mutating ``env`` so the derived URLs stay coherent.
+        Public so callers (e.g. the provider's save_config) don't need to
+        reach into private state.
+        """
         h = hosts_for(self.env)
         self.api_base = f"https://{h['api']}{API_PREFIX}"
         self.auth_url = f"https://{h['auth']}"
