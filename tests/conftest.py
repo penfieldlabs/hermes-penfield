@@ -22,6 +22,15 @@ from hermes_penfield.config import Environment, PenfieldConfig
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "integration: needs live dev API")
+    # Surface dev-readiness in the session header (belt-and-braces; the real
+    # gate is _integration_ready() in the live fixtures below).
+    env = os.environ.get("PENFIELD_ENV", "<unset>")
+    key_status = "set" if os.environ.get("PENFIELD_API_KEY") else "<unset>"
+    if not _integration_ready():
+        print(
+            f"\n[integration] PENFIELD_ENV={env!r} PENFIELD_API_KEY={key_status}; "
+            "integration tests will be skipped (dev-only, requires both)."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -67,16 +76,28 @@ def client(fake_auth: FakeAuth, dev_config: PenfieldConfig) -> PenfieldClient:
     return PenfieldClient(fake_auth, dev_config, sleep=lambda _s: None)
 
 
+def _integration_ready() -> bool:
+    """True only when explicitly pointed at DEV with a key present."""
+    env = os.environ.get("PENFIELD_ENV", "").lower()
+    key = os.environ.get("PENFIELD_API_KEY", "")
+    # Hard refusal of prod: even if someone sets the key, dev is required.
+    return bool(key) and env == "dev"
+
+
 # ---------------------------------------------------------------------------
 # Integration fixtures (live dev API)
 # ---------------------------------------------------------------------------
-
-
-def _integration_ready() -> bool:
-    return (
-        bool(os.environ.get("PENFIELD_API_KEY"))
-        and os.environ.get("PENFIELD_ENV", "").lower() == "dev"
-    )
+#
+# INVARIANT: live integration tests may ONLY run against the dev environment.
+# They create and delete real memories in a real tenant. Two independent
+# gates enforce this — if either fails, every integration test is skipped:
+#
+#   1. PENFIELD_ENV must be exactly "dev" (never prod, never unset).
+#   2. PENFIELD_API_KEY must be set.
+#
+# Additionally, tests that *create* memories gate on the `can_delete` fixture
+# so they never leave orphan junk (see test_integration.py). No creation
+# without guaranteed cleanup. See ADR-0011.
 
 
 @pytest.fixture(scope="session")
@@ -103,7 +124,15 @@ def live_jwt() -> str:
 
 @pytest.fixture
 def live_client(live_jwt: str) -> PenfieldClient:
-    """A client whose auth is a fixed JWT (no refresh path exercised)."""
+    """A client hard-pinned to DEV, authenticated with a fresh JWT.
+
+    Belt-and-braces: even if env vars were mutated mid-session, this client's
+    config is constructed with ``Environment.DEV`` and an explicit dev URL,
+    so it physically cannot reach prod. Integration tests must use this.
+    """
+    # Final refusal: never construct a live client if we're not on dev.
+    if os.environ.get("PENFIELD_ENV", "").lower() != "dev":
+        pytest.skip("live_client refuses to construct without PENFIELD_ENV=dev")
     from hermes_penfield.auth import TokenSet
 
     cfg = PenfieldConfig(env=Environment.DEV, api_key="unused")

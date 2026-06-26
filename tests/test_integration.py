@@ -2,13 +2,27 @@
 # Copyright (C) 2026 Penfield
 """Live integration tests against api-dev.penfield.app.
 
-Run with:
+⚠️  These tests WRITE to a real Penfield tenant (create/update/delete
+    memories, relationships, artifacts). They are dev-only by design.
+
+RUN (dev only — they will skip otherwise):
 
     PENFIELD_API_KEY=... PENFIELD_ENV=dev pytest -m integration
 
-These are skipped by default. They exercise the real round-trip:
-key exchange, store, recall, fetch, connect, explore, reflect, artifacts,
-awaken, update, delete. See ADR-0015.
+FAILSAFES (see ADR-0011, enforced in conftest.py):
+
+1. ``PENFIELD_ENV`` MUST be ``dev``. Prod is refused at three layers:
+   the session gate, the ``live_jwt`` fixture, and the ``live_client``
+   fixture (which is hard-pinned to ``Environment.DEV`` + dev URL).
+2. ``PENFIELD_API_KEY`` must be set.
+3. Tests that create memories gate on ``can_delete`` and skip ENTIRELY
+   (before creating anything) if the key can't clean up — no orphan junk.
+4. Every created memory carries the ``hermes-penfield-int-*`` tag so a
+   bulk purge is always one search away.
+
+If you re-run these against a tenant you care about, expect transient
+memories during the run. Lifecycle/relationship tests clean up after
+themselves when the key has ``delete`` scope; otherwise they skip.
 """
 
 from __future__ import annotations
