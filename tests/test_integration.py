@@ -28,8 +28,39 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.integration
 
 
+# Every memory created by these tests is tagged with this prefix so a bulk
+# purge is always one search away. Never commit pollution without a tag
+# that makes it findable. See ADR-0011.
+_INTEGRATION_TAG_PREFIX = "hermes-penfield-int"
+
+
 def _unique_tag() -> str:
-    return f"int-{uuid.uuid4().hex[:8]}"
+    return f"{_INTEGRATION_TAG_PREFIX}-{uuid.uuid4().hex[:8]}"
+
+
+@pytest.fixture
+def can_delete(live_client: PenfieldClient) -> bool:
+    """Probe whether the dev key has the `delete` scope.
+
+    Does this *without creating trash*: we attempt to delete a known-bogus
+    UUID. A 404 means we have scope (memory just didn't exist); a 403 means
+    we don't. Polluting tests gate on this — **no creation without
+    guaranteed cleanup.**
+    """
+    from hermes_penfield.exceptions import APIError, AuthError
+
+    bogus = "00000000-0000-0000-0000-000000000000"
+    try:
+        live_client.call("memory_delete", path_params={"memory_id": bogus})
+    except NotFoundError:
+        return True
+    except AuthError as exc:
+        if "delete" in str(exc).lower() or "scope" in str(exc).lower():
+            return False
+        raise
+    except APIError:
+        return False
+    return True
 
 
 class TestAuthRoundTrip:
@@ -38,7 +69,12 @@ class TestAuthRoundTrip:
 
 
 class TestStoreRecallDelete:
-    def test_full_lifecycle(self, live_client: PenfieldClient) -> None:
+    def test_full_lifecycle(self, live_client: PenfieldClient, can_delete: bool) -> None:
+        # No creation without guaranteed cleanup. If the dev key can't
+        # delete, running this would leave permanent trash in the tenant —
+        # so skip the whole test, not just the teardown.
+        if not can_delete:
+            pytest.skip("dev key lacks delete scope; skipping to avoid pollution")
         tag = _unique_tag()
         # Store
         created = live_client.call(
@@ -79,23 +115,16 @@ class TestStoreRecallDelete:
                 f"expected {mem_id} in recall results for {tag}; got {[i['id'] for i in items]}"
             )
         finally:
-            # Delete requires the `delete` scope, which the default dev API
-            # key may lack. If so, the lifecycle still proved store/fetch/
-            # update/recall; skip rather than fail on a scope limitation.
-            from hermes_penfield.exceptions import AuthError
-
-            try:
-                live_client.call("memory_delete", path_params={"memory_id": mem_id})
-            except AuthError as exc:
-                if "delete" not in str(exc):
-                    raise
-                pytest.skip(f"dev key lacks delete scope: {exc}")
+            # Guaranteed cleanup: the can_delete gate passed.
+            live_client.call("memory_delete", path_params={"memory_id": mem_id})
             with pytest.raises(NotFoundError):
                 live_client.call("memory_get", path_params={"memory_id": mem_id})
 
 
 class TestRelationships:
-    def test_connect_and_explore(self, live_client: PenfieldClient) -> None:
+    def test_connect_and_explore(self, live_client: PenfieldClient, can_delete: bool) -> None:
+        if not can_delete:
+            pytest.skip("dev key lacks delete scope; skipping to avoid pollution")
         tag = _unique_tag()
         a = live_client.call(
             "memory_create",
@@ -125,15 +154,9 @@ class TestRelationships:
             )
             assert "error" not in explored
         finally:
-            from hermes_penfield.exceptions import AuthError
-
+            # Guaranteed cleanup because the can_delete gate passed.
             for mid in (a["id"], b["id"]):
-                try:
-                    live_client.call("memory_delete", path_params={"memory_id": mid})
-                except AuthError as exc:
-                    if "delete" not in str(exc):
-                        raise
-                    pytest.skip(f"dev key lacks delete scope: {exc}")
+                live_client.call("memory_delete", path_params={"memory_id": mid})
 
 
 class TestReflect:

@@ -20,3 +20,10 @@ creds get disabled and rot.
   failure, not a silent field mismatch.
 - The dev API key used in development is held in `.env` (gitignored,
   mode 0600) and never committed.
+- **Pollution is a first-class concern.** Tests that create memories
+  (lifecycle, relationships) gate on a `can_delete` probe *before
+  creating anything* and skip entirely if the key can't clean up. Every
+  created memory carries the `hermes-penfield-int-*` tag prefix so a
+  bulk purge is always one search away. The lesson: "skip on delete
+  failure" is the *wrong* design — it guarantees trash while reporting
+  green. No creation without guaranteed cleanup.
