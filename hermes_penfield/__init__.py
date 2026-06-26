@@ -12,6 +12,8 @@ package, in particular ADR-0003 (spec vs. real API divergence).
 
 from __future__ import annotations
 
+from typing import Any
+
 from hermes_penfield.auth import PenfieldAuth
 from hermes_penfield.client import PenfieldClient
 from hermes_penfield.config import Environment, PenfieldConfig
@@ -29,17 +31,20 @@ __all__ = [
 __version__ = "0.1.0"
 
 
-def register() -> type:
-    """Return the provider class for Hermes plugin discovery.
+def register(ctx: Any) -> None:
+    """Register Penfield as a memory provider plugin.
 
-    Hermes loads providers via the ``hermes_agent.plugins`` entry point,
-    which must resolve to a callable that returns the provider class.
-    Importing :class:`~hermes_penfield.provider.PenfieldMemoryProvider` at
-    module top-level would pull the Hermes ``agent`` package into the
-    import graph even when it is absent (e.g. during unit tests of the
-    client). Keeping this lazy lets the low-level modules stay importable
-    without Hermes installed.
+    Hermes resolves the ``hermes_agent.plugins`` entry point to this
+    callable and invokes it with a :class:`~hermes_cli.plugins.PluginContext`.
+    The contract is ``register(ctx) -> None``; the plugin must call
+    ``ctx.register_memory_provider(instance)``. Returning the class (the
+    v0.1.0 guess) is wrong — Hermes never reads the return value, and the
+    missing ``ctx`` parameter raised ``TypeError`` at load time.
+
+    ``ctx`` is typed ``Any`` (not the real ``PluginContext``) so this module
+    stays importable without Hermes installed; the low-level stack never
+    imports Hermes. See ADR-0007.
     """
     from hermes_penfield.provider import PenfieldMemoryProvider
 
-    return PenfieldMemoryProvider
+    ctx.register_memory_provider(PenfieldMemoryProvider())

@@ -53,7 +53,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "storing secrets. Prefer concise, self-contained content."
         ),
         "priority": 0,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "content": {"type": "string", "minLength": 1, "maxLength": 10000},
@@ -73,7 +73,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "decisions, or facts. Combines BM25, vector, and graph search."
         ),
         "priority": 0,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "minLength": 1, "maxLength": 4000},
@@ -93,7 +93,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "queries; use this when tuning retrieval behavior."
         ),
         "priority": 0,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "minLength": 1, "maxLength": 4000},
@@ -123,7 +123,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "(supports, contradicts, follows, depends_on, ...)."
         ),
         "priority": 0,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "from_id": {"type": "string", "format": "uuid"},
@@ -149,7 +149,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "penfield_fetch",
         "description": "Retrieve a single memory by its UUID.",
         "priority": 0,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {"memory_id": {"type": "string", "format": "uuid"}},
             "required": ["memory_id"],
@@ -163,7 +163,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "PUT (not PATCH)."
         ),
         "priority": 0,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "memory_id": {"type": "string", "format": "uuid"},
@@ -181,7 +181,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "penfield_delete",
         "description": "Permanently delete a memory by UUID. Requires delete permission.",
         "priority": 0,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {"memory_id": {"type": "string", "format": "uuid"}},
             "required": ["memory_id"],
@@ -196,7 +196,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "(supports/contradicts/follows chains)."
         ),
         "priority": 1,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "start_memory_id": {"type": "string", "format": "uuid"},
@@ -217,7 +217,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "periodically to surface themes, active topics, and open threads."
         ),
         "priority": 1,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "time_window": {
@@ -233,7 +233,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "penfield_list_artifacts",
         "description": "List artifacts stored under a directory prefix.",
         "priority": 1,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "prefix": {"type": "string", "default": "/"},
@@ -248,7 +248,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "Use for long-form reference material (notes, specs, configs)."
         ),
         "priority": 1,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "path": {
@@ -265,7 +265,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "penfield_retrieve_artifact",
         "description": "Retrieve an artifact's content by its slash-path.",
         "priority": 1,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {"path": {"type": "string"}},
             "required": ["path"],
@@ -280,7 +280,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "SOUL.md; does not replace it. See ADR-0008."
         ),
         "priority": 2,
-        "input_schema": {"type": "object", "properties": {}},
+        "parameters": {"type": "object", "properties": {}},
     },
 ]
 

@@ -245,22 +245,25 @@ class PenfieldMemoryProvider:
     # ------------------------------------------------------------------
     # Pre-compress — synthesized as a checkpoint memory. See ADR-0005.
     # ------------------------------------------------------------------
-    def on_pre_compress(self, messages: Sequence[object]) -> None:
-        """Capture context before the host discards messages.
+    def on_pre_compress(self, messages: Sequence[object]) -> str:
+        """Capture context before the host discards messages; return digest.
 
-        The spec's ``POST /context/save`` does not exist. Instead, when
-        ``pre_compress_save`` is enabled (default), we store a compact
-        ``checkpoint``-type memory summarizing the tail of the window. This
-        uses the real ``POST /memories`` endpoint with ``memory_type``
-        ``checkpoint`` and ``source_type`` ``checkpoint``.
+        Per the MemoryProvider ABC, the returned string is folded into the
+        compression summary prompt so the compressor preserves provider-
+        extracted insights. The spec's ``POST /context/save`` does not
+        exist, so when ``pre_compress_save`` is enabled (default) we BOTH
+        (a) store a compact ``checkpoint``-type memory via the real
+        ``POST /memories`` endpoint and (b) return the digest text for
+        Hermes to fold into its compression summary. (v0.1.0 returned None,
+        silently dropping the digest on Hermes' side.)
         """
         if self._client is None or not self._config or not self._config.pre_compress_save:
-            return
+            return ""
         tail = list(messages[-20:]) if messages else []
         if not tail:
-            return
+            return ""
+        digest = _summarize_window(self._session_id, tail)
         try:
-            digest = _summarize_window(self._session_id, tail)
             dispatch(
                 self._client,
                 "penfield_store",
@@ -273,18 +276,36 @@ class PenfieldMemoryProvider:
             )
         except (PenfieldError, ValueError, OSError) as exc:
             logger.warning("pre-compress checkpoint store failed (non-fatal): %s", exc)
+        return digest
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Opt-in mirror of MEMORY.md/USER.md writes. Off by default.
 
         Penfield is the source of truth; mirroring creates duplicates and
-        confuses recall. See ADR-0010.
+        confuses recall. See ADR-0010. ``metadata`` carries structured
+        provenance (write_origin, session_id, platform, ...) per the ABC;
+        we forward it into the stored memory's metadata when mirroring is
+        opted in.
         """
         if not self._config or not self._config.mirror_builtin_writes:
             return
         if self._client is None:
             return
         # Defensive: never forward content that looks like a secret.
+        # metadata (write_origin/session_id/platform/...) is ABC provenance;
+        # we surface action+target+origin as tags since the store tool has
+        # no metadata field.
+        tags = ["builtin-mirror", target, f"action:{action}"]
+        if metadata and isinstance(metadata, dict):
+            origin = metadata.get("write_origin") or metadata.get("tool_name")
+            if origin:
+                tags.append(f"origin:{origin}")
         try:
             dispatch(
                 self._client,
@@ -292,7 +313,7 @@ class PenfieldMemoryProvider:
                 {
                     "content": content[:10000],
                     "memory_type": "reference",
-                    "tags": ["builtin-mirror", target],
+                    "tags": tags[:10],
                 },
             )
         except (PenfieldError, ValueError, OSError) as exc:

@@ -47,8 +47,8 @@ class TestSchemas:
         for t in PENFIELD_TOOL_SCHEMAS:
             assert "name" in t
             assert "description" in t
-            assert "input_schema" in t
-            assert t["input_schema"]["type"] == "object"
+            assert "parameters" in t
+            assert t["parameters"]["type"] == "object"
 
     def test_names_match_spec(self) -> None:
         expected = {
