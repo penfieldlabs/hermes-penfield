@@ -98,7 +98,7 @@ ignore_missing_imports = true
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --strict-markers --tb=short --cov=hermes_penfield --cov-branch --cov-report=term-missing"
+addopts = "-v --strict-markers --tb=short --cov=hermes_penfield --cov-branch --cov-report=term-missing --cov-fail-under=80"
 markers = [
     "integration: marks tests that hit the live dev API (need PENFIELD_API_KEY + PENFIELD_ENV=dev)",
     "slow: marks tests that are slow",

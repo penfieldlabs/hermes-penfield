@@ -16,7 +16,29 @@ pre-commit install
 
 ## Quality Bar
 
-Every change must pass:
+Every change must pass the CI checks, which are structured as:
+
+| Job            | What it enforces                          | Scope        |
+| -------------- | ------------------------------------------ | ------------ |
+| `lint`         | `ruff check` + `ruff format --check` + `mypy` | Runs once, fast, blocks test/integration |
+| `test`         | `pytest -m "not integration"` + **80% coverage gate** | Matrix: Python 3.10–3.13 |
+| `integration`  | Live round-trip vs `api-dev.penfield.app` | Dev-only, needs `PENFIELD_DEV_API_KEY` secret + `RUN_INTEGRATION=true` var |
+| `version-tag-guard` | Tag must match `pyproject.toml` version | Tags only |
+
+Lint runs as a standalone job (not duplicated across the version matrix)
+so a lint failure is fast feedback, not buried in test output. `test` and
+`integration` both depend on `lint` passing.
+
+### Required status checks (branch protection)
+
+Configure these as required status checks on `main` and `dev`:
+
+- `lint`
+- `test (3.10)` / `test (3.11)` / `test (3.12)` / `test (3.13)`
+
+(`integration` is optional — it only runs when `RUN_INTEGRATION=true`.)
+
+### Local checks before push
 
 ```bash
 ruff check .          # lint (zero warnings)
