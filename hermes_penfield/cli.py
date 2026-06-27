@@ -99,13 +99,11 @@ def cmd_install(args: argparse.Namespace) -> int:
     import shutil
     from pathlib import Path
 
+    # Resolve HERMES_HOME the way Hermes itself does: env var, else ~/.hermes.
+    # A new user won't have HERMES_HOME exported, so defaulting is required.
     hermes_home = getattr(args, "hermes_home", "") or os.environ.get("HERMES_HOME", "")
     if not hermes_home:
-        print(
-            "error: HERMES_HOME not set; pass --hermes-home or set the env var",
-            file=sys.stderr,
-        )
-        return 2
+        hermes_home = str(Path.home() / ".hermes")
     home = Path(hermes_home).expanduser()
     plugins_root = home / "plugins"
     dest = plugins_root / "penfield"
