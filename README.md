@@ -22,47 +22,71 @@ user-inspectable objects the user owns and can edit or delete.
 
 ---
 
+## Requirements
+
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** installed and
+  runnable (`hermes` on your PATH). hermes-penfield is a *memory provider*
+  that plugs into Hermes — it does nothing on its own.
+- A **Penfield account** and API key — create one at
+  [portal.penfield.app](https://portal.penfield.app) → Settings → API Keys.
+
 ## Install
 
+hermes-penfield has to land in two places Hermes looks: the package must be
+importable from **Hermes' own Python** (it runs in its own venv), and a
+small discovery shim must live in **Hermes' plugin directory**.
+
 ```bash
-pip install hermes-penfield
-hermes-penfield install    # drop the Hermes discovery shim into $HERMES_HOME/plugins/penfield/
+# 1. Install the package into Hermes' venv (NOT the system Python).
+#    Hermes' venv lives at ~/.hermes/hermes-agent/venv/ by default.
+~/.hermes/hermes-agent/venv/bin/pip install hermes-penfield
+
+# 2. Drop the discovery shim into Hermes' plugin scan directory.
+#    Hermes discovers memory providers by scanning ~/.hermes/plugins/<name>/,
+#    NOT via pip entry points. See ADR-0014.
+~/.hermes/hermes-agent/venv/bin/hermes-penfield install
 ```
+
+> **Why two steps?** Hermes discovers memory providers by directory scan
+> (`~/.hermes/plugins/<name>/`), and the package must be importable from
+> Hermes' private venv. `pip install` into the system Python won't be
+> visible to Hermes; an entry-point-only install silently never registers.
+> See [ADR-0014](docs/adr/0014-directory-discovery-not-entry-points.md).
 
 No runtime dependencies — stdlib only (Python 3.10+).
 
-> **Why two steps?** Hermes discovers memory providers by scanning
-> `$HERMES_HOME/plugins/<name>/` directories — **not** via pip entry
-> points (the general plugin path has no `register_memory_provider` on
-> its context). `pip install` ships the implementation;
-> `hermes-penfield install` drops the directory shim Hermes actually
-> finds. See [ADR-0014](docs/adr/0014-directory-discovery-not-entry-points.md).
-
-Then set `memory.provider: penfield` in `$HERMES_HOME/config.yaml`.
-
 ## Configure
 
-Set credentials via environment variables (recommended) or
-`hermes memory setup`:
+**Credentials** — add to `~/.hermes/.env` (Hermes loads this on startup):
 
 ```bash
-# API key (simplest — CI/headless). OAuth device code is the interactive
-# alternative via `hermes penfield login`.
-export PENFIELD_API_KEY=tm_yourtenant_ak_yourkey
-
-# Target dev during development; prod is the default.
-export PENFIELD_ENV=dev   # or "prod"
+PENFIELD_API_KEY=tm_pf_yourtenant_ak_yourkey
+PENFIELD_ENV=prod   # or "dev" for api-dev.penfield.app
 ```
 
-Credentials are never written to the repo. Tokens cache to
-`{hermes_home}/penfield/tokens.json` with mode `0600`. See
-[SECURITY.md](SECURITY.md).
+**Activate the provider** — edit `~/.hermes/config.yaml`:
 
-## Use
+```yaml
+memory:
+  provider: penfield
+```
 
-Once installed (`pip install hermes-penfield` +
-`hermes-penfield install`) and activated via `memory.provider: penfield`,
-the 13 `penfield_*` tools become available to the agent:
+Verify before launching Hermes:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/hermes-penfield status
+# should show: api_key set: yes, authenticated: yes, memory count: <N>
+```
+
+## Run
+
+```bash
+hermes
+```
+
+On startup Hermes discovers Penfield alongside its built-in providers,
+loads it, and exposes the 13 `penfield_*` tools. Invoke `penfield_awaken`
+inside Hermes to load the persistent-memory briefing.
 
 | Tool                    | What it does                                  |
 | ----------------------- | --------------------------------------------- |
