@@ -34,16 +34,21 @@ __version__ = "0.1.0"
 def register(ctx: Any) -> None:
     """Register Penfield as a memory provider plugin.
 
-    Hermes resolves the ``hermes_agent.plugins`` entry point to this
-    callable and invokes it with a :class:`~hermes_cli.plugins.PluginContext`.
-    The contract is ``register(ctx) -> None``; the plugin must call
-    ``ctx.register_memory_provider(instance)``. Returning the class (the
-    v0.1.0 guess) is wrong — Hermes never reads the return value, and the
-    missing ``ctx`` parameter raised ``TypeError`` at load time.
+    This is the programmatic registration entry point, matching Hermes'
+    ``register(ctx) -> None`` contract (it calls
+    ``ctx.register_memory_provider(instance)``). The same function is
+    re-exported by the bundled ``plugin_dir/__init__.py`` shim, which is
+    the path Hermes actually discovers via directory scan.
+
+    NOTE: ``hermes-penfield`` is NOT wired via a pip entry point.
+    Hermes' memory subsystem discovers providers by scanning
+    ``$HERMES_HOME/plugins/<name>/`` directories only; the general plugin
+    entry-point path has no ``register_memory_provider`` on its context.
+    Install via ``hermes-penfield install``. See ADR-0014.
 
     ``ctx`` is typed ``Any`` (not the real ``PluginContext``) so this module
     stays importable without Hermes installed; the low-level stack never
-    imports Hermes. See ADR-0007.
+    imports Hermes.
     """
     from hermes_penfield.provider import PenfieldMemoryProvider
 

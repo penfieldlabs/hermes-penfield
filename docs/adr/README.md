@@ -25,6 +25,7 @@ supersedes an earlier one gets a new, numbered ADR that links back.
 | 11  | [Integration tests hit the live dev API; skip cleanly without creds](0011-integration-tests-hit-live-dev-api.md) | Accepted |
 | 12  | [Send a real User-Agent; Cloudflare blocks bare urllib](0012-real-user-agent-required.md) | Accepted |
 | 13  | [Validate integration seams against real source, not guesses](0013-validate-seams-against-real-source.md) | Accepted |
+| 14  | [Memory providers are directory-installed, not pip entry points](0014-directory-discovery-not-entry-points.md) | Accepted |
 
 ## When to write an ADR
 

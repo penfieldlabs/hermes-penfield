@@ -26,9 +26,19 @@ user-inspectable objects the user owns and can edit or delete.
 
 ```bash
 pip install hermes-penfield
+hermes-penfield install    # drop the Hermes discovery shim into $HERMES_HOME/plugins/penfield/
 ```
 
 No runtime dependencies — stdlib only (Python 3.10+).
+
+> **Why two steps?** Hermes discovers memory providers by scanning
+> `$HERMES_HOME/plugins/<name>/` directories — **not** via pip entry
+> points (the general plugin path has no `register_memory_provider` on
+> its context). `pip install` ships the implementation;
+> `hermes-penfield install` drops the directory shim Hermes actually
+> finds. See [ADR-0014](docs/adr/0014-directory-discovery-not-entry-points.md).
+
+Then set `memory.provider: penfield` in `$HERMES_HOME/config.yaml`.
 
 ## Configure
 
@@ -50,9 +60,9 @@ Credentials are never written to the repo. Tokens cache to
 
 ## Use
 
-Once installed and configured, Hermes discovers the provider via the
-`hermes_agent.plugins` entry point. The 13 `penfield_*` tools become
-available to the agent:
+Once installed (`pip install hermes-penfield` +
+`hermes-penfield install`) and activated via `memory.provider: penfield`,
+the 13 `penfield_*` tools become available to the agent:
 
 | Tool                    | What it does                                  |
 | ----------------------- | --------------------------------------------- |
@@ -72,6 +82,7 @@ available to the agent:
 
 ```bash
 hermes-penfield status            # connection + memory count
+hermes-penfield install           # install the Hermes discovery shim
 hermes-penfield search <query>    # quick semantic search
 hermes-penfield stats             # memory/relationship counts
 hermes-penfield login             # OAuth device code flow

@@ -44,8 +44,11 @@ dev = [
     "ruff>=0.6",
 ]
 
-[project.entry-points."hermes_agent.plugins"]
-penfield = "hermes_penfield:register"
+# NOTE: no [project.entry-points."hermes_agent.plugins"]. Hermes discovers
+# memory providers by directory scan ($HERMES_HOME/plugins/<name>/), not
+# entry points — the general plugin path has no register_memory_provider on
+# its context, so an entry-point-only install silently never registers. Use
+# `hermes-penfield install` instead. See ADR-0014.
 
 [project.urls]
 Source = "https://github.com/penfieldlabs/hermes-penfield"
@@ -56,8 +59,14 @@ Documentation = "https://docs.penfield.app"
 include = ["hermes_penfield*"]
 exclude = ["tests*"]
 
+# plugin_dir/ is NOT a Python package (it's the Hermes discovery shim); ship
+# it as data so `hermes-penfield install` can copy it into HERMES_HOME.
 [tool.setuptools.package-data]
 hermes_penfield = ["py.typed"]
+
+[tool.setuptools.data-files]
+# Installed alongside the package as <prefix>/plugin_dir/...
+"plugin_dir" = ["plugin_dir/__init__.py", "plugin_dir/plugin.yaml", "plugin_dir/README.md"]
 
 # ---------------------------------------------------------------------------
 # Ruff

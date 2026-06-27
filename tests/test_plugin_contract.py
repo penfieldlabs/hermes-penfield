@@ -161,3 +161,98 @@ class TestToolSchemaShape:
 class TestPublicSurface:
     def test_register_is_exported(self) -> None:
         assert hasattr(hermes_penfield, "register")
+
+
+class TestDirectoryDiscovery:
+    """The REAL load path: directory scan, not pip entry point.
+
+    Pins the lesson from ADR-0014 — Hermes discovers memory providers from
+    $HERMES_HOME/plugins/<name>/ via a text scan for 'register_memory_provider',
+    then calls register(ctx) on the loaded module. v0.1.0 shipped a pip
+    entry point that never registered. These tests simulate the real loader.
+    """
+
+    def test_plugin_dir_shim_is_recognized_by_text_scan(self) -> None:
+        """Hermes' _is_memory_provider_dir does a literal substring scan."""
+        import pathlib
+
+        shim = pathlib.Path(__file__).resolve().parent.parent / "plugin_dir" / "__init__.py"
+        source = shim.read_text(errors="replace")[:8192]
+        # Verbatim replica of plugins/memory/__init__.py:_is_memory_provider_dir
+        assert "register_memory_provider" in source or "MemoryProvider" in source
+
+    def test_plugin_dir_shim_registers_via_collector(self, tmp_path: Any) -> None:
+        """Simulate the directory loader: load shim, call register(ctx)."""
+        import importlib.util
+        import pathlib
+
+        shim = pathlib.Path(__file__).resolve().parent.parent / "plugin_dir" / "__init__.py"
+        spec = importlib.util.spec_from_file_location("penfield_shim_test", shim)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        class Collector:
+            def __init__(self) -> None:
+                self.provider = None
+
+            def register_memory_provider(self, provider: Any) -> None:
+                self.provider = provider
+
+        ctx = Collector()
+        mod.register(ctx)
+        from hermes_penfield.provider import PenfieldMemoryProvider
+
+        assert isinstance(ctx.provider, PenfieldMemoryProvider)
+
+    def test_install_copies_shim_to_hermes_home(self, tmp_path: Any) -> None:
+        """`hermes-penfield install` drops a recognizable shim into HERMES_HOME."""
+        import importlib.util
+
+        import hermes_penfield.cli as cli
+
+        rc = cli.main(["install", "--hermes-home", str(tmp_path)])
+        assert rc == 0
+        installed = tmp_path / "plugins" / "penfield" / "__init__.py"
+        assert installed.exists()
+        # The installed copy must be recognizable + functional.
+        source = installed.read_text(errors="replace")[:8192]
+        assert "register_memory_provider" in source
+        spec = importlib.util.spec_from_file_location("inst_test", installed)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        captured: dict[str, Any] = {}
+
+        class C:
+            def register_memory_provider(self, p: Any) -> None:
+                captured["provider"] = p
+
+        mod.register(C())
+        assert captured["provider"] is not None
+
+    def test_install_refuses_without_force(self, tmp_path: Any) -> None:
+        import hermes_penfield.cli as cli
+
+        cli.main(["install", "--hermes-home", str(tmp_path)])
+        # Second install without --force should fail.
+        rc = cli.main(["install", "--hermes-home", str(tmp_path)])
+        assert rc != 0
+
+    def test_no_pip_entry_point_advertised(self) -> None:
+        """ADR-0014: a pip entry point would silently never register.
+
+        Assert pyproject does NOT declare hermes_agent.plugins (the general
+        plugin entry-point group), since the general PluginContext has no
+        register_memory_provider.
+        """
+        import pathlib
+
+        import tomllib
+
+        pp = pathlib.Path(__file__).resolve().parent.parent / "pyproject.toml"
+        data = tomllib.loads(pp.read_text())
+        # project.entry-points must not contain hermes_agent.plugins
+        eps = data.get("project", {}).get("entry-points", {}) or {}
+        assert "hermes_agent.plugins" not in eps, (
+            "pip entry point would silently never register; use directory install"
+        )

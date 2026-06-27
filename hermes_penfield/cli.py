@@ -88,6 +88,49 @@ def cmd_logout(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_install(args: argparse.Namespace) -> int:
+    """Install the Hermes plugin directory shim into $HERMES_HOME/plugins/penfield.
+
+    Hermes discovers memory providers by directory scan, not pip entry
+    point (ADR-0014). This copies the bundled ``plugin_dir/`` shim into
+    ``$HERMES_HOME/plugins/penfield/`` so the loader finds it.
+    """
+    import os
+    import shutil
+    from pathlib import Path
+
+    hermes_home = getattr(args, "hermes_home", "") or os.environ.get("HERMES_HOME", "")
+    if not hermes_home:
+        print(
+            "error: HERMES_HOME not set; pass --hermes-home or set the env var",
+            file=sys.stderr,
+        )
+        return 2
+    home = Path(hermes_home).expanduser()
+    plugins_root = home / "plugins"
+    dest = plugins_root / "penfield"
+
+    # Locate the bundled shim shipped inside this package.
+    src = Path(__file__).resolve().parent.parent / "plugin_dir"
+    if not src.is_dir():
+        print(f"error: bundled plugin shim not found at {src}", file=sys.stderr)
+        return 1
+
+    plugins_root.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        if not getattr(args, "force", False):
+            print(
+                f"error: {dest} already exists; pass --force to overwrite",
+                file=sys.stderr,
+            )
+            return 1
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    print(f"installed penfield plugin shim to {dest}")
+    print("next: set 'memory.provider: penfield' in your config.yaml")
+    return 0
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     _, client = _build_config_and_client(getattr(args, "hermes_home", ""))
     query = " ".join(getattr(args, "query", []) or [])
@@ -129,6 +172,7 @@ _COMMANDS = {
     "status": cmd_status,
     "login": cmd_login,
     "logout": cmd_logout,
+    "install": cmd_install,
     "search": cmd_search,
     "stats": cmd_stats,
     "version": cmd_version,
@@ -179,6 +223,13 @@ def _add_commands(sub: Any) -> None:
 
     p = sub.add_parser("logout", help="Clear cached tokens")
     p.add_argument("--hermes-home", default="")
+
+    p = sub.add_parser(
+        "install",
+        help="Install the Hermes plugin shim to $HERMES_HOME/plugins/penfield",
+    )
+    p.add_argument("--hermes-home", default="")
+    p.add_argument("--force", action="store_true", help="overwrite an existing install")
 
     p = sub.add_parser("search", help="Quick semantic search from the CLI")
     p.add_argument("query", nargs=argparse.REMAINDER)
