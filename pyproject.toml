@@ -44,6 +44,13 @@ dev = [
     "ruff>=0.6",
 ]
 
+# The standalone CLI binary. `hermes-penfield install`, `status`, etc. are
+# the user-facing surface — without this declaration none of the documented
+# commands exist (the v0.1.0-v0.1.0+3 round-4 bug: tests called main()
+# directly, so the suite stayed green while the binary was absent).
+[project.scripts]
+hermes-penfield = "hermes_penfield.cli:main"
+
 # NOTE: no [project.entry-points."hermes_agent.plugins"]. Hermes discovers
 # memory providers by directory scan ($HERMES_HOME/plugins/<name>/), not
 # entry points — the general plugin path has no register_memory_provider on

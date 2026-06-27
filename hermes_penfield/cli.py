@@ -244,3 +244,10 @@ def _add_commands(sub: Any) -> None:
 
 # resolve_environment is re-exported for CLI-level env validation tests.
 __all__ = ["main", "register_cli", "resolve_environment"]
+
+
+if __name__ == "__main__":
+    # Makes `python -m hermes_penfield.cli ...` work, mirroring the console
+    # script and hermes_penfield.__main__. Without this the module imports
+    # silently and exits 0 (the round-4 bug).
+    raise SystemExit(main())

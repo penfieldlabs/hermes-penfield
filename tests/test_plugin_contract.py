@@ -256,3 +256,78 @@ class TestDirectoryDiscovery:
         assert "hermes_agent.plugins" not in eps, (
             "pip entry point would silently never register; use directory install"
         )
+
+
+class TestRealEntryPoint:
+    """Exercises the ACTUAL CLI binary via subprocess, not main().
+
+    All four review rounds failed because tests called main([...]) directly
+    while the real user-facing entry point was broken (round 4: the binary
+    didn't exist). These tests invoke the documented commands as a user
+    would, so a missing/wrong entry point fails here before it can ship.
+    """
+
+    def test_console_script_runs_version(self) -> None:
+        import subprocess
+
+        result = subprocess.run(
+            ["hermes-penfield", "version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == hermes_penfield.__version__
+
+    def test_python_dash_m_runs_version(self) -> None:
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-m", "hermes_penfield", "version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == hermes_penfield.__version__
+
+    def test_cli_dash_m_module_runs_version(self) -> None:
+        """python -m hermes_penfield.cli — was a silent no-op before the
+        __main__ guard was added."""
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-m", "hermes_penfield.cli", "version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == hermes_penfield.__version__
+
+    def test_console_script_install_works(self, tmp_path: Any) -> None:
+        """The documented install command, run as a real subprocess."""
+        import subprocess
+
+        result = subprocess.run(
+            ["hermes-penfield", "install", "--hermes-home", str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "plugins" / "penfield" / "__init__.py").exists()
+
+    def test_pyproject_declares_console_script(self) -> None:
+        import pathlib
+
+        import tomllib
+
+        pp = pathlib.Path(__file__).resolve().parent.parent / "pyproject.toml"
+        data = tomllib.loads(pp.read_text())
+        scripts = data.get("project", {}).get("scripts", {}) or {}
+        assert scripts.get("hermes-penfield") == "hermes_penfield.cli:main", (
+            "console script missing — documented commands won't exist"
+        )
