@@ -10,7 +10,6 @@ with an ``argparse`` subparser. Each command is also runnable directly via
 from __future__ import annotations
 
 import argparse
-import importlib.resources
 import json
 import sys
 from typing import TYPE_CHECKING, Any
@@ -94,7 +93,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     """Install the Hermes plugin directory shim into $HERMES_HOME/plugins/penfield.
 
     Hermes discovers memory providers by directory scan, not pip entry
-    point (ADR-0014). This copies the bundled ``plugin_data/`` shim into
+    point (ADR-0014). This copies the bundled ``plugin_dir/`` shim into
     ``$HERMES_HOME/plugins/penfield/`` so the loader finds it.
     """
     import os
@@ -110,19 +109,18 @@ def cmd_install(args: argparse.Namespace) -> int:
     plugins_root = home / "plugins"
     dest = plugins_root / "penfield"
 
-    # Locate the bundled shim shipped inside this package. Use
-    # importlib.resources so it resolves correctly across install types
-    # (editable, wheel, sdist) — the old Path(__file__).parent.parent
-    # heuristic only worked for editable installs.
-    try:
-        src = importlib.resources.files("hermes_penfield") / "plugin_data"
-        # Traversable -> Path for shutil.copytree; resolve via as_file for wheels.
-        with importlib.resources.as_file(src) as src_path:
-            src = Path(src_path)
-        if not src.is_dir():
-            raise FileNotFoundError(str(src))
-    except (ModuleNotFoundError, FileNotFoundError) as exc:
-        print(f"error: bundled plugin shim not found: {exc}", file=sys.stderr)
+    # Locate the bundled shim at the repo root (plugin_dir/).
+    # Works for editable/source installs — the common case for this command.
+    # For wheel-only installs, use `hermes plugins install <repo>/plugin_dir`
+    # instead (the primary documented path). See ADR-0014.
+    src = Path(__file__).resolve().parent.parent / "plugin_dir"
+    if not src.is_dir():
+        print(
+            f"error: bundled plugin shim not found at {src}.\n"
+            "For wheel installs, use: hermes plugins install "
+            "penfieldlabs/hermes-penfield/plugin_dir --enable",
+            file=sys.stderr,
+        )
         return 1
 
     plugins_root.mkdir(parents=True, exist_ok=True)

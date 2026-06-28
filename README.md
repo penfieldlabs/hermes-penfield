@@ -32,34 +32,46 @@ user-inspectable objects the user owns and can edit or delete.
 
 ## Install
 
-The primary install path uses Hermes' own plugin installer, which drops the
-provider into `~/.hermes/plugins/penfield/` (where Hermes discovers memory
-providers) and handles the Python package install into Hermes' venv:
+Two things need to land where Hermes looks: the **Python package** must
+be importable from Hermes' own venv, and the **discovery shim** must live
+in Hermes' plugin scan directory (`~/.hermes/plugins/penfield/`). Neither
+command alone is sufficient — Hermes' plugin installer doesn't auto-install
+pip dependencies, and the pip package doesn't include the directory shim.
+
+### 1. Install the Python package into Hermes' venv
+
+Hermes runs in its own venv (~/.hermes/hermes-agent/venv/). The package must
+land there or Hermes can't import it:
 
 ```bash
-hermes plugins install penfieldlabs/hermes-penfield --enable
-```
-
-That's it — one command. Hermes' installer clones the repo, installs the
-Python package into its own venv, drops the discovery shim into place, and
-enables the plugin.
-
-### Manual install (alternative)
-
-If you prefer to do it by hand, or the installer isn't available:
-
-```bash
-# 1. Install the package into Hermes' venv (NOT the system Python).
 ~/.hermes/hermes-agent/venv/bin/pip install git+https://github.com/penfieldlabs/hermes-penfield.git
-
-# 2. Drop the discovery shim.
-~/.hermes/hermes-agent/venv/bin/hermes-penfield install
 ```
 
-> **Why a directory shim?** Hermes discovers memory providers by scanning
-> `~/.hermes/plugins/<name>/`, NOT via pip entry points — the general plugin
-> path has no `register_memory_provider` on its context. See
+### 2. Install the discovery shim via Hermes' plugin installer
+
+The shim lives in `plugin_dir/` of the repo. Hermes' native installer takes
+a subdir identifier and copies just that directory into place:
+
+```bash
+hermes plugins install penfieldlabs/hermes-penfield/plugin_dir --enable
+```
+
+### Alternative: manual shim install (dev / editable installs)
+
+For editable installs where the repo is on your local path, the bundled
+installer copies the shim directly:
+
+```bash
+hermes-penfield install    # copies plugin_dir/ → ~/.hermes/plugins/penfield/
+```
+
+> **Why two steps?** Hermes discovers memory providers by scanning
+> `~/.hermes/plugins/<name>/` directories (NOT via pip entry points), and
+> the shim's `__init__.py` imports from the `hermes_penfield` package — so
+> both the directory and the package must be present. See
 > [ADR-0014](docs/adr/0014-directory-discovery-not-entry-points.md).
+
+No runtime dependencies — stdlib only (Python 3.10+).
 
 ## Configure
 

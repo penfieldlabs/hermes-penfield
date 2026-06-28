@@ -176,12 +176,7 @@ class TestDirectoryDiscovery:
         """Hermes' _is_memory_provider_dir does a literal substring scan."""
         import pathlib
 
-        shim = (
-            pathlib.Path(__file__).resolve().parent.parent
-            / "hermes_penfield"
-            / "plugin_data"
-            / "__init__.py"
-        )
+        shim = pathlib.Path(__file__).resolve().parent.parent / "plugin_dir" / "__init__.py"
         source = shim.read_text(errors="replace")[:8192]
         # Verbatim replica of plugins/memory/__init__.py:_is_memory_provider_dir
         assert "register_memory_provider" in source or "MemoryProvider" in source
@@ -191,12 +186,7 @@ class TestDirectoryDiscovery:
         import importlib.util
         import pathlib
 
-        shim = (
-            pathlib.Path(__file__).resolve().parent.parent
-            / "hermes_penfield"
-            / "plugin_data"
-            / "__init__.py"
-        )
+        shim = pathlib.Path(__file__).resolve().parent.parent / "plugin_dir" / "__init__.py"
         spec = importlib.util.spec_from_file_location("penfield_shim_test", shim)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

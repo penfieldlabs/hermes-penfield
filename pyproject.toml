@@ -66,11 +66,8 @@ Documentation = "https://docs.penfield.app"
 include = ["hermes_penfield*"]
 exclude = ["tests*"]
 
-# Ship the Hermes discovery shim (plugin_data/) as package data so
-# `hermes-penfield install` can copy it via importlib.resources. Uses
-# package-data (the modern mechanism), not the deprecated data-files.
 [tool.setuptools.package-data]
-hermes_penfield = ["py.typed", "plugin_data/*"]
+hermes_penfield = ["py.typed"]
 
 # ---------------------------------------------------------------------------
 # Ruff
