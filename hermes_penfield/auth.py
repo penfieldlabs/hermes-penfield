@@ -153,12 +153,27 @@ class PenfieldAuth:
         )
 
     def refresh(self) -> TokenSet:
-        """Force a refresh; called by the client on a 401."""
+        """Force a refresh; called by the client on a 401.
+
+        RFC 9700 rotates refresh tokens, so a cached refresh token can become
+        permanently invalid (process restart mid-rotation, clock skew, server
+        side revoke). When that happens and an API key is configured, fall back
+        to a fresh key exchange rather than stranding the provider until a
+        manual logout.
+        """
         if self._tokens is None or not self._tokens.refresh_token:
             if self._api_key:
                 return self._exchange_api_key(self._api_key)
             raise TokenExpiredError("no refresh token and no API key; re-authenticate")
-        return self._refresh(self._tokens.refresh_token)
+        try:
+            return self._refresh(self._tokens.refresh_token)
+        except TokenExpiredError:
+            # Refresh token dead (rotated/expired/revoked). Fall back to a
+            # fresh API-key exchange if we have one; otherwise propagate.
+            if self._api_key:
+                self._tokens = None
+                return self._exchange_api_key(self._api_key)
+            raise
 
     def logout(self) -> None:
         """Drop cached tokens from memory and disk."""
