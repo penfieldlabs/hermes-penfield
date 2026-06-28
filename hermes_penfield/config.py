@@ -230,6 +230,10 @@ class PenfieldConfig:
             "pre_compress_save": self.pre_compress_save,
             "max_prefetch_chars": self.max_prefetch_chars,
         }
+        # Persist a URL override if one is set (issue #3: was being dropped
+        # on restart, so users who configured a custom endpoint lost it).
+        if self.api_base and not self.api_base.startswith("https://api"):
+            data["penfield_url"] = self.api_base
         cfg_path.write_text(json.dumps(data, indent=2))
         with contextlib.suppress(OSError):
             cfg_path.chmod(0o600)

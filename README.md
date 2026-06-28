@@ -32,28 +32,34 @@ user-inspectable objects the user owns and can edit or delete.
 
 ## Install
 
-hermes-penfield has to land in two places Hermes looks: the package must be
-importable from **Hermes' own Python** (it runs in its own venv), and a
-small discovery shim must live in **Hermes' plugin directory**.
+The primary install path uses Hermes' own plugin installer, which drops the
+provider into `~/.hermes/plugins/penfield/` (where Hermes discovers memory
+providers) and handles the Python package install into Hermes' venv:
+
+```bash
+hermes plugins install penfieldlabs/hermes-penfield --enable
+```
+
+That's it — one command. Hermes' installer clones the repo, installs the
+Python package into its own venv, drops the discovery shim into place, and
+enables the plugin.
+
+### Manual install (alternative)
+
+If you prefer to do it by hand, or the installer isn't available:
 
 ```bash
 # 1. Install the package into Hermes' venv (NOT the system Python).
-#    Hermes' venv lives at ~/.hermes/hermes-agent/venv/ by default.
-~/.hermes/hermes-agent/venv/bin/pip install hermes-penfield
+~/.hermes/hermes-agent/venv/bin/pip install git+https://github.com/penfieldlabs/hermes-penfield.git
 
-# 2. Drop the discovery shim into Hermes' plugin scan directory.
-#    Hermes discovers memory providers by scanning ~/.hermes/plugins/<name>/,
-#    NOT via pip entry points. See ADR-0014.
+# 2. Drop the discovery shim.
 ~/.hermes/hermes-agent/venv/bin/hermes-penfield install
 ```
 
-> **Why two steps?** Hermes discovers memory providers by directory scan
-> (`~/.hermes/plugins/<name>/`), and the package must be importable from
-> Hermes' private venv. `pip install` into the system Python won't be
-> visible to Hermes; an entry-point-only install silently never registers.
-> See [ADR-0014](docs/adr/0014-directory-discovery-not-entry-points.md).
-
-No runtime dependencies — stdlib only (Python 3.10+).
+> **Why a directory shim?** Hermes discovers memory providers by scanning
+> `~/.hermes/plugins/<name>/`, NOT via pip entry points — the general plugin
+> path has no `register_memory_provider` on its context. See
+> [ADR-0014](docs/adr/0014-directory-discovery-not-entry-points.md).
 
 ## Configure
 
@@ -74,7 +80,7 @@ memory:
 Verify before launching Hermes:
 
 ```bash
-~/.hermes/hermes-agent/venv/bin/hermes-penfield status
+hermes-penfield status
 # should show: api_key set: yes, authenticated: yes, memory count: <N>
 ```
 

@@ -186,6 +186,15 @@ class PenfieldMemoryProvider:
     # ------------------------------------------------------------------
     # Auto-recall
     # ------------------------------------------------------------------
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        """Queue a background recall for the NEXT turn.
+
+        Hermes calls this after every turn (memory_manager.py:535). We use
+        synchronous recall in :meth:`prefetch`, so this is a no-op — but it
+        must exist on the duck-typed instance or Hermes logs a warning every
+        turn (the ABC default isn't inherited without subclassing).
+        """
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Auto-recall relevant memories before a turn (best-effort).
 
