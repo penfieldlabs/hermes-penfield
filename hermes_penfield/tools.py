@@ -411,6 +411,13 @@ def _connect(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
             body[key] = args[key]
     if body.get("direction_type") == "INVERSE_PAIRED" and not body.get("inverse_type"):
         raise ValueError("direction_type INVERSE_PAIRED requires inverse_type")
+    # Validate inverse_type against the enum (relationship_type was checked
+    # above; inverse_type had no runtime validation despite being in the schema).
+    inverse = body.get("inverse_type")
+    if inverse is not None and inverse not in RELATIONSHIP_TYPES:
+        raise ValueError(
+            f"inverse_type {inverse!r} not in the {len(RELATIONSHIP_TYPES)} valid types"
+        )
     return client.call("relationship_create", body=body)
 
 
@@ -502,6 +509,8 @@ _SECRET_PATTERNS = (
     "github_pat_",
     "xoxb-",
     "AKIA",
+    "sk-",
+    "sk_live_",
 )
 
 

@@ -66,14 +66,11 @@ Documentation = "https://docs.penfield.app"
 include = ["hermes_penfield*"]
 exclude = ["tests*"]
 
-# plugin_dir/ is NOT a Python package (it's the Hermes discovery shim); ship
-# it as data so `hermes-penfield install` can copy it into HERMES_HOME.
+# Ship the Hermes discovery shim (plugin_data/) as package data so
+# `hermes-penfield install` can copy it via importlib.resources. Uses
+# package-data (the modern mechanism), not the deprecated data-files.
 [tool.setuptools.package-data]
-hermes_penfield = ["py.typed"]
-
-[tool.setuptools.data-files]
-# Installed alongside the package as <prefix>/plugin_dir/...
-"plugin_dir" = ["plugin_dir/__init__.py", "plugin_dir/plugin.yaml", "plugin_dir/README.md"]
+hermes_penfield = ["py.typed", "plugin_data/*"]
 
 # ---------------------------------------------------------------------------
 # Ruff

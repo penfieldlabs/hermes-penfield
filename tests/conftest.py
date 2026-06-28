@@ -4,7 +4,7 @@
 
 Unit tests never touch the network. Integration tests (marked
 ``@pytest.mark.integration``) hit the live dev API and are skipped unless
-``PENFIELD_API_KEY`` and ``PENFIELD_ENV=dev`` are set — see ADR-0015.
+``PENFIELD_API_KEY`` and ``PENFIELD_ENV=dev`` are set — see ADR-0011.
 """
 
 from __future__ import annotations

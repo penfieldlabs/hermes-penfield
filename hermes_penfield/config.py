@@ -62,6 +62,19 @@ def hosts_for(env: Environment) -> dict[str, str]:
     return env.hosts
 
 
+def default_api_base(env: Environment) -> str:
+    """Return the API base URL that ``env`` would derive by default.
+
+    Used to decide whether the current ``api_base`` is a custom override
+    (worth persisting) or just the env-derived default (reproducible from
+    ``penfield_env`` alone). Replaces a fragile ``startswith('https://api')``
+    heuristic that wrongly treated custom URLs like
+    ``https://api-private.example.com`` as defaults.
+    """
+    h = hosts_for(env)
+    return f"https://{h['api']}{API_PREFIX}"
+
+
 def _penfield_dir(hermes_home: str | Path) -> Path:
     """Return ``{hermes_home}/penfield``, creating it if possible."""
     base = Path(hermes_home)
@@ -230,9 +243,12 @@ class PenfieldConfig:
             "pre_compress_save": self.pre_compress_save,
             "max_prefetch_chars": self.max_prefetch_chars,
         }
-        # Persist a URL override if one is set (issue #3: was being dropped
-        # on restart, so users who configured a custom endpoint lost it).
-        if self.api_base and not self.api_base.startswith("https://api"):
+        # Persist the URL override only when it differs from what the
+        # current env would derive — otherwise we'd either drop a real
+        # custom override on restart (the heuristic bug) or redundantly
+        # persist the default. Compare against the derived default, not a
+        # string-prefix guess.
+        if self.api_base and self.api_base != default_api_base(self.env):
             data["penfield_url"] = self.api_base
         cfg_path.write_text(json.dumps(data, indent=2))
         with contextlib.suppress(OSError):

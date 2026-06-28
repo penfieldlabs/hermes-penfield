@@ -84,6 +84,10 @@ class PenfieldClient:
     # ------------------------------------------------------------------
     # Rate limiting
     # ------------------------------------------------------------------
+    def is_authenticated(self) -> bool:
+        """Return whether the underlying auth holds a usable token."""
+        return self._auth.is_authenticated()
+
     def _enforce_rate_limit(self) -> None:
         """Block until we are under the RPM cap (sliding 60s window)."""
         now = time.monotonic()

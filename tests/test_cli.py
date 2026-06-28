@@ -36,6 +36,9 @@ class TestStatus:
             def call(self, *a: Any, **k: Any) -> Any:
                 return {"total_memories": 42}
 
+            def is_authenticated(self) -> bool:
+                return True
+
         monkeypatch.delenv("PENFIELD_API_KEY", raising=False)
         cfg = PenfieldConfig(env=Environment.PROD)
         monkeypatch.setattr(cli, "_build_config_and_client", lambda h: (cfg, StubClient()))  # type: ignore[arg-type]
@@ -60,6 +63,9 @@ class TestStatus:
         class StubClient:
             def call(self, *a: Any, **k: Any) -> Any:
                 raise APIError("nope", status=500)
+
+            def is_authenticated(self) -> bool:
+                return True
 
         monkeypatch.setattr(
             cli,

@@ -10,6 +10,7 @@ with an ``argparse`` subparser. Each command is also runnable directly via
 from __future__ import annotations
 
 import argparse
+import importlib.resources
 import json
 import sys
 from typing import TYPE_CHECKING, Any
@@ -54,8 +55,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"environment: {cfg.env.value}")
     print(f"api_base: {cfg.api_base}")
     print(f"api_key set: {'yes' if cfg.api_key else 'no'}")
-    auth = PenfieldAuth(cfg, getattr(args, "hermes_home", "") or None)
-    print(f"authenticated: {'yes' if auth.is_authenticated() else 'no'}")
+    # Reuse the client's auth rather than constructing a second PenfieldAuth
+    # (the cosmetic double-build the reviewer flagged).
+    print(f"authenticated: {'yes' if client.is_authenticated() else 'no'}")
     # The help text promises a memory count, so actually fetch it.
     # Non-fatal: if the tenant is unreachable, report that rather than fail.
     try:
@@ -92,7 +94,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     """Install the Hermes plugin directory shim into $HERMES_HOME/plugins/penfield.
 
     Hermes discovers memory providers by directory scan, not pip entry
-    point (ADR-0014). This copies the bundled ``plugin_dir/`` shim into
+    point (ADR-0014). This copies the bundled ``plugin_data/`` shim into
     ``$HERMES_HOME/plugins/penfield/`` so the loader finds it.
     """
     import os
@@ -108,10 +110,19 @@ def cmd_install(args: argparse.Namespace) -> int:
     plugins_root = home / "plugins"
     dest = plugins_root / "penfield"
 
-    # Locate the bundled shim shipped inside this package.
-    src = Path(__file__).resolve().parent.parent / "plugin_dir"
-    if not src.is_dir():
-        print(f"error: bundled plugin shim not found at {src}", file=sys.stderr)
+    # Locate the bundled shim shipped inside this package. Use
+    # importlib.resources so it resolves correctly across install types
+    # (editable, wheel, sdist) — the old Path(__file__).parent.parent
+    # heuristic only worked for editable installs.
+    try:
+        src = importlib.resources.files("hermes_penfield") / "plugin_data"
+        # Traversable -> Path for shutil.copytree; resolve via as_file for wheels.
+        with importlib.resources.as_file(src) as src_path:
+            src = Path(src_path)
+        if not src.is_dir():
+            raise FileNotFoundError(str(src))
+    except (ModuleNotFoundError, FileNotFoundError) as exc:
+        print(f"error: bundled plugin shim not found: {exc}", file=sys.stderr)
         return 1
 
     plugins_root.mkdir(parents=True, exist_ok=True)

@@ -37,7 +37,7 @@ def register(ctx: Any) -> None:
     This is the programmatic registration entry point, matching Hermes'
     ``register(ctx) -> None`` contract (it calls
     ``ctx.register_memory_provider(instance)``). The same function is
-    re-exported by the bundled ``plugin_dir/__init__.py`` shim, which is
+    re-exported by the bundled ``plugin_data/__init__.py`` shim, which is
     the path Hermes actually discovers via directory scan.
 
     NOTE: ``hermes-penfield`` is NOT wired via a pip entry point.
