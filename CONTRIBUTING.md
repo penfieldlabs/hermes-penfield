@@ -69,7 +69,7 @@ way?" — and add one before merge for any new non-trivial decision.
 ## The One Unverified Seam
 
 The Hermes `MemoryProvider` ABC is duck-typed, not subclassed, because no
-canonical Hermes source was verifiable during v0.1.0. Everything below
+canonical Hermes source was verifiable during v0.2.0. Everything below
 the provider layer is verified against the real Hermes MemoryProvider
 ABC (github.com/NousResearch/hermes-agent). See
 [ADR-0010](docs/adr/0010-directory-discovery-not-entry-points.md).

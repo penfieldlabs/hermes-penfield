@@ -11,7 +11,7 @@ shape so the client does not care which produced the tokens:
 * **OAuth 2.1 device code** (RFC 8628): for interactive CLI login.
   Discovers endpoints dynamically, optionally uses dynamic client
   registration, polls the token endpoint until the user authorizes. Not
-  fully exercised against the live dev IdP during v0.1.0 because it needs
+  fully exercised against the live dev IdP during v0.2.0 because it needs
   a browser step — implemented to the documented contract and unit-tested
   with mocked HTTP. See ADR-0005.
 

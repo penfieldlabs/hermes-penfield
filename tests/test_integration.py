@@ -209,7 +209,7 @@ class TestArtifacts:
             )
             assert "error" not in listed
         finally:
-            pass  # artifacts have no documented delete in v0.1.0
+            pass  # artifacts have no documented delete in v0.2.0
 
 
 class TestAwaken:

@@ -70,7 +70,7 @@ def penfield_command(args: argparse.Namespace) -> None:
 # Command implementations
 # ---------------------------------------------------------------------------
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def _resolve_hermes_home(hermes_home: str = "") -> str:

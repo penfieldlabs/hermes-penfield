@@ -105,7 +105,7 @@ def live_jwt() -> str:
         headers={
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
-            "User-Agent": "hermes-penfield/0.1.0",
+            "User-Agent": "hermes-penfield/0.2.0",
         },
     )
     with urllib.request.urlopen(req, timeout=30) as resp:

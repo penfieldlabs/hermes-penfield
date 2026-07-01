@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-penfield"
-version = "0.1.0"
+version = "0.2.0"
 description = "Penfield persistent memory provider for Hermes Agent"
 readme = "README.md"
 license = {text = "MIT"}
@@ -47,14 +47,14 @@ dev = [
 
 # The standalone CLI binary. `hermes-penfield install`, `status`, etc. are
 # the user-facing surface — without this declaration none of the documented
-# commands exist (the v0.1.0-v0.1.0+3 round-4 bug: tests called main()
+# commands exist (the v0.2.0-v0.2.0+3 round-4 bug: tests called main()
 # directly, so the suite stayed green while the binary was absent).
 
 # NOTE: no [project.entry-points."hermes_agent.plugins"]. Hermes discovers
 # memory providers by directory scan ($HERMES_HOME/plugins/<name>/), not
 # entry points — the general plugin path has no register_memory_provider on
 # its context, so an entry-point-only install silently never registers. Use
-# `hermes-penfield install` instead. See ADR-0014.
+# `hermes-penfield install` instead. See ADR-0010.
 
 [project.urls]
 Source = "https://github.com/penfieldlabs/hermes-penfield"
@@ -104,7 +104,7 @@ filterwarnings = [
     "error::ResourceWarning",
 ]
 
-# Starting floor for v0.1.0. The low-level client/auth/tools are fully
+# Starting floor for v0.2.0. The low-level client/auth/tools are fully
 # unit-tested; the provider layer carries documented risk (ADR-0007) and is
 # covered by smoke tests. Raise this as the integration seams harden.
 [tool.coverage.run]

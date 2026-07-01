@@ -38,8 +38,8 @@ class _RecordingClient:
 
 
 class TestSchemas:
-    def test_sixteen_tools(self) -> None:
-        assert len(PENFIELD_TOOL_SCHEMAS) == 16
+    def test_seventeen_tools(self) -> None:
+        assert len(PENFIELD_TOOL_SCHEMAS) == 17
 
     def test_each_has_required_fields(self) -> None:
         for t in PENFIELD_TOOL_SCHEMAS:
@@ -65,6 +65,7 @@ class TestSchemas:
             "penfield_delete_artifact",
             "penfield_list_contexts",
             "penfield_restore_context",
+            "penfield_save_context",
         }
         assert expected == TOOL_NAMES
 
@@ -226,31 +227,36 @@ class TestRestoreContext:
         dispatch(c, "penfield_restore_context", {"name": "awakening"})
         assert c.calls[0][0] == "personality_awakening"
 
-    def test_restore_checkpoint_searches(self) -> None:
+    def test_restore_checkpoint_exact_match(self) -> None:
         c = _RecordingClient()
-        result = json.loads(dispatch(c, "penfield_restore_context", {"name": "API Investigation"}))
-        assert c.calls[0][0] == "search_hybrid"
+
+        def mock_call(endpoint, **kw):
+            c.calls.append((endpoint, kw.get("body", {}), kw.get("query", {})))
+            if endpoint == "memory_list":
+                return {
+                    "items": [{"id": "cp1", "content": json.dumps({"checkpoint_name": "test-cp"})}]
+                }
+            if endpoint == "memory_get" and kw.get("path_params", {}).get("memory_id") == "cp1":
+                return {
+                    "content": json.dumps(
+                        {
+                            "checkpoint_name": "test-cp",
+                            "description": "test",
+                            "memory_ids": [],
+                            "referenced_memories": [],
+                        }
+                    )
+                }
+            return {"id": "m1", "content": "x"}
+
+        c.call = mock_call
+        result = json.loads(dispatch(c, "penfield_restore_context", {"name": "test-cp"}))
+        assert c.calls[0][0] == "memory_list"
         assert "memories" in result
 
     def test_restore_nonexistent_returns_error(self) -> None:
         c = _RecordingClient()
-        # The recording client returns search results with items,
-        # so override to return empty
-        c2 = type(c)()
-        c2.calls = []
-
-        def empty_search(*a, **kw):
-            c2.calls.append(
-                (
-                    a[0] if a else kw.get("endpoint_name", ""),
-                    kw.get("body", {}),
-                    kw.get("query", {}),
-                )
-            )
-            return {"items": []}
-
-        c2.call = empty_search
-        result = json.loads(dispatch(c2, "penfield_restore_context", {"name": "nonexistent"}))
+        result = json.loads(dispatch(c, "penfield_restore_context", {"name": "nonexistent"}))
         assert "error" in result
 
 
@@ -281,3 +287,89 @@ class TestRecallTagsTranslation:
         dispatch(c, "penfield_recall", {"query": "q", "limit": 5})
         _, body, _ = c.calls[0]
         assert body == {"query": "q", "limit": 5}
+
+
+class TestSaveContext:
+    """save_context: creates checkpoint with structured content + reference parsing."""
+
+    def test_creates_checkpoint_with_name_and_tags(self) -> None:
+        c = _RecordingClient()
+        result = json.loads(
+            dispatch(
+                c,
+                "penfield_save_context",
+                {
+                    "name": "Test Session",
+                    "description": "Testing save_context",
+                },
+            )
+        )
+        name, body, _ = c.calls[-1]  # last call is the create
+        assert name == "memory_create"
+        assert body["memory_type"] == "checkpoint"
+        assert body["importance"] == 0.9
+        assert "Test Session" in body["tags"]
+        assert result["success"] is True
+        assert result["references_extracted"] == 0
+
+    def test_parses_memory_id_references(self) -> None:
+        c = _RecordingClient()
+        result = json.loads(
+            dispatch(
+                c,
+                "penfield_save_context",
+                {
+                    "name": "Ref Test",
+                    "description": (
+                        "See memory_id: 550e8400-e29b-41d4-a716-446655440000 for details"
+                    ),
+                },
+            )
+        )
+        assert result["references_extracted"] == 1
+        assert result["references_resolved"] == 1
+
+    def test_parses_memory_phrase_references(self) -> None:
+        c = _RecordingClient()
+        result = json.loads(
+            dispatch(
+                c,
+                "penfield_save_context",
+                {
+                    "name": "Phrase Test",
+                    "description": "Related to memory: 'OAuth device flow'",
+                },
+            )
+        )
+        assert result["references_extracted"] == 1
+
+    def test_rejects_duplicate_name(self) -> None:
+        c = _RecordingClient()
+        # Override the memory_list to return an existing checkpoint with same name
+        original_call = c.call
+
+        def mock_call(endpoint, **kw):
+            if (
+                endpoint == "memory_list"
+                and kw.get("query", {}).get("memory_type") == "checkpoint"
+            ):
+                return {
+                    "items": [
+                        {"id": "existing", "content": json.dumps({"checkpoint_name": "Dup Name"})}
+                    ]
+                }
+            return original_call(endpoint, **kw)
+
+        c.call = mock_call
+        result = json.loads(
+            dispatch(
+                c,
+                "penfield_save_context",
+                {
+                    "name": "Dup Name",
+                    "description": "should fail",
+                },
+            )
+        )
+        assert result["success"] is False
+        assert result["error_code"] == "DUPLICATE_NAME"

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 # The canonical MCP tool list. Update this when the MCP server adds/removes tools.
 # Source: penfieldlabs/docs, mcp/mcp-integration.md, "Available Tools" table.
-# save_context is deliberately excluded — held for v1.1.0 (ADR-0011, issue #3).
+# All MCP tools are implemented.
 MCP_TOOLS_IMPLEMENTED = {
     "awaken",
     "store",
@@ -32,11 +32,10 @@ MCP_TOOLS_IMPLEMENTED = {
     "delete_artifact",
     "list_contexts",
     "restore_context",
-}
-
-MCP_TOOLS_HELD = {
     "save_context",
 }
+
+MCP_TOOLS_HELD = set()
 
 MCP_TOOLS_ALL = MCP_TOOLS_IMPLEMENTED | MCP_TOOLS_HELD
 
@@ -72,7 +71,7 @@ class TestMCPDrift:
         )
 
     def test_held_tools_documented(self) -> None:
-        """Held tools (save_context) must be tracked, not silently dropped."""
+        """Held tools must be tracked, not silently dropped."""
         from penfield.provider import PenfieldMemoryProvider
 
         p = PenfieldMemoryProvider()

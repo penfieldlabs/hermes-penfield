@@ -70,24 +70,21 @@ class TestRegisterContract:
 class TestPreCompressReturnsDigest:
     """ABC: on_pre_compress -> str. v0.1.0 returned None (silent drop)."""
 
-    def test_returns_digest_string(self, tmp_path: Any) -> None:
+    def test_returns_empty_string(self, tmp_path: Any) -> None:
         from penfield.provider import PenfieldMemoryProvider
 
         p = PenfieldMemoryProvider()
         p.initialize("sess-abc", hermes_home=str(tmp_path))
 
-        # Stub the store dispatch so no network call is made.
         import penfield.provider as prov
 
+        original = prov.dispatch
         prov.dispatch = lambda c, n, a: "{}"  # type: ignore[assignment]
         try:
             result = p.on_pre_compress([{"role": "user", "content": "remember this thread"}])
         finally:
-            import importlib
-
-            importlib.reload(prov)
-        assert isinstance(result, str)
-        assert "remember this thread" in result
+            prov.dispatch = original  # type: ignore[assignment]
+        assert result == ""
 
     def test_returns_empty_string_when_disabled(self, tmp_path: Any) -> None:
         from penfield.provider import PenfieldMemoryProvider
@@ -173,7 +170,7 @@ class TestDirectoryDiscovery:
     entry point that never registered. These tests simulate the real loader.
     """
 
-    def test_plugin_is_recognized_is_recognized_by_text_scan(self) -> None:
+    def test_plugin_is_recognized_by_text_scan(self) -> None:
         """Hermes' _is_memory_provider_dir does a literal substring scan."""
         import pathlib
 

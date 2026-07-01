@@ -32,7 +32,7 @@ class TestIdentity:
 
     def test_tool_schemas_count(self, tmp_path: Any) -> None:
         p, _ = _make_provider(tmp_path)
-        assert len(p.get_tool_schemas()) == 16
+        assert len(p.get_tool_schemas()) == 17
 
 
 class TestSystemPrompt:
@@ -99,9 +99,9 @@ class TestPreCompress:
             p.on_pre_compress(messages)
         finally:
             prov.dispatch = orig  # type: ignore[assignment]
-        assert captured["name"] == "penfield_store"
-        assert captured["args"]["memory_type"] == "checkpoint"
-        assert "do a thing" in captured["args"]["content"]
+        assert captured["name"] == "penfield_save_context"
+        # Description is LLM-generated (or fallback). Just verify save_context was called.
+        assert captured["args"]["name"].startswith("pre-compress-")
 
     def test_disabled_is_noop(self, tmp_path: Any) -> None:
         p, _fake = _make_provider(tmp_path)

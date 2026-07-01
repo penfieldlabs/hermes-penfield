@@ -2,7 +2,7 @@
 
 **Penfield persistent memory provider for Hermes Agent.**
 
-Connects Hermes Agent to the Penfield memory API. Exposes 16 tools
+Connects Hermes Agent to the Penfield memory API. Exposes 17 tools
 mirroring the Penfield MCP surface. Stdlib-only HTTP, OAuth device-code
 + API-key authentication, dev/prod environment switching.
 
@@ -49,6 +49,10 @@ PENFIELD_API_KEY=tm_pf_yourtenant_ak_yourkey
 PENFIELD_ENV=prod
 ```
 
+When context compression discards messages, the provider saves a Penfield
+checkpoint capturing the relevant memories from your knowledge graph. On by
+default; set `pre_compress_save: false` in `penfield/config.json` to disable.
+
 ## Use
 
 ```
@@ -56,7 +60,7 @@ hermes
 ```
 
 The persona and persistent context load automatically on every session.
-The 16 tools are available to the agent:
+The 17 tools are available to the agent:
 
 | Tool | What it does |
 | ---- | ------------ |
@@ -76,9 +80,8 @@ The 16 tools are available to the agent:
 | `penfield_delete_artifact` | Delete a stored file by path |
 | `penfield_list_contexts` | List saved context checkpoints |
 | `penfield_restore_context` | Restore a checkpoint by name |
+| `penfield_save_context` | Create a checkpoint with reference parsing |
 
-> **Note:** `save_context` (creating new checkpoints) is held for a
-> future version. See [ADR-0011](docs/adr/0011-context-tools-partial-implementation.md).
 
 ## Development
 

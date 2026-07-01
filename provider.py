@@ -18,13 +18,14 @@ It duck-types the expected method set so that:
   file.
 
 Lifecycle methods with no real Penfield endpoint (``sync_turn``,
-``on_pre_compress``) are implemented defensively: see ADR-0004.
+``on_pre_compress``) are implemented defensively: see ADR-0012.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -140,7 +141,7 @@ class PenfieldMemoryProvider:
     # Tool surface
     # ------------------------------------------------------------------
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        """Return the 16 penfield_* tool schemas for the host."""
+        """Return the 17 penfield_* tool schemas for the host."""
         return [dict(t) for t in PENFIELD_TOOL_SCHEMAS]
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **_: object) -> str:
@@ -252,7 +253,7 @@ class PenfieldMemoryProvider:
             return ""
 
     # ------------------------------------------------------------------
-    # Turn sync — NO real /turns/sync endpoint. See ADR-0004.
+    # Turn sync — NO real /turns/sync endpoint.
     # ------------------------------------------------------------------
     def sync_turn(
         self,
@@ -262,7 +263,7 @@ class PenfieldMemoryProvider:
         session_id: str = "",
         messages: object = None,
     ) -> None:
-        """No-op in v0.1.0.
+        """No-op (no upstream endpoint).
 
         The spec described a ``POST /turns/sync`` endpoint that does not
         exist in the real Penfield API. To avoid silent failure we
@@ -273,43 +274,41 @@ class PenfieldMemoryProvider:
         """
         if self._config and not self._config.sync_turn_enabled:
             return
-        logger.debug("sync_turn is a no-op in v0.1.0 (no /turns/sync endpoint)")
+        logger.debug("sync_turn is a no-op (no /turns/sync endpoint)")
 
     # ------------------------------------------------------------------
-    # Pre-compress — synthesized as a checkpoint memory. See ADR-0004.
+    # Pre-compress — synthesized as a checkpoint memory. See ADR-0012.
     # ------------------------------------------------------------------
     def on_pre_compress(self, messages: Sequence[object]) -> str:
-        """Capture context before the host discards messages; return digest.
+        """Save a checkpoint before Hermes compresses the context window.
 
-        Per the MemoryProvider ABC, the returned string is folded into the
-        compression summary prompt so the compressor preserves provider-
-        extracted insights. The spec's ``POST /context/save`` does not
-        exist, so when ``pre_compress_save`` is enabled (default) we BOTH
-        (a) store a compact ``checkpoint``-type memory via the real
-        ``POST /memories`` endpoint and (b) return the digest text for
-        Hermes to fold into its compression summary. (v0.1.0 returned None,
-        silently dropping the digest on Hermes' side.)
+        Creates a save_context checkpoint capturing relevant memories from
+        the knowledge graph. The checkpoint name is unique per call
+        (session + timestamp). Returns empty string — Hermes compresses
+        how it wants.
         """
         if self._client is None or not self._config or not self._config.pre_compress_save:
             return ""
         tail = list(messages[-20:]) if messages else []
         if not tail:
             return ""
-        digest = _summarize_window(self._session_id, tail)
+        from datetime import datetime, timezone
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        name = f"pre-compress-{self._session_id}-{ts}"
+        description = _summarize_window(self._session_id, tail)
         try:
             dispatch(
                 self._client,
-                "penfield_store",
+                "penfield_save_context",
                 {
-                    "content": digest,
-                    "memory_type": "checkpoint",
-                    "importance": 0.4,
-                    "tags": ["hermes-penfield", "pre-compress"],
+                    "name": name,
+                    "description": description,
                 },
             )
         except (PenfieldError, ValueError, OSError) as exc:
-            logger.warning("pre-compress checkpoint store failed (non-fatal): %s", exc)
-        return digest
+            logger.warning("pre-compress checkpoint save failed (non-fatal): %s", exc)
+        return ""
 
     def on_memory_write(
         self,
@@ -371,19 +370,74 @@ class PenfieldMemoryProvider:
 
 
 def _summarize_window(session_id: str, messages: Sequence[object]) -> str:
-    """Render a compact, lossy digest of the tail of a message window.
+    """Summarize recent conversation into a short checkpoint description.
 
-    Each message contributes at most one line of its textual content so the
-    resulting memory stays within sane bounds regardless of window size.
+    Uses Hermes auxiliary LLM (cheap/fast) with fallback to main model,
+    then to user-message-only text if no LLM is available.
     """
-    parts = [f"[hermes-penfield pre-compress checkpoint — session {session_id[:8]}]"]
-    for msg in messages:
+    parts: list[str] = []
+    total = 0
+    for msg in messages[-20:]:
         role = _msg_role(msg)
+        if role not in ("user", "assistant"):
+            continue
         text = _msg_text(msg)
         if not text:
             continue
-        parts.append(f"- {role}: {text[:300]}")
-    return "\n".join(parts)
+        text = re.sub(r"\{[^{}]{40,}\}", "", text)
+        text = re.sub(r"\[[^\[\]]{40,}\]", "", text)
+        text = re.sub(r"\s{2,}", " ", text).strip()
+        if not text:
+            continue
+        chunk = f"{role}: {text[:300]}"
+        parts.append(chunk)
+        total += len(chunk)
+        if total > 8000:
+            break
+    if not parts:
+        return f"Session {session_id}"
+
+    transcript = "\n".join(parts)
+
+    try:
+        from agent.auxiliary_client import call_llm  # type: ignore[import-not-found]
+
+        prompt = [
+            {
+                "role": "user",
+                "content": (
+                    "Summarize this conversation in 1-2 sentences "
+                    "(under 200 chars). Focus on WHAT was discussed "
+                    "and decided, not how. No meta-commentary.\n\n" + transcript
+                ),
+            }
+        ]
+        try:
+            resp = call_llm(
+                task="compression",
+                messages=prompt,
+                temperature=0,
+                max_tokens=100,
+            )
+            logger.info("_summarize_window: used auxiliary LLM")
+        except Exception:
+            resp = call_llm(
+                messages=prompt,
+                temperature=0,
+                max_tokens=100,
+            )
+            logger.info("_summarize_window: used main LLM (aux unavailable)")
+        summary = resp.choices[0].message.content.strip()
+        if summary and len(summary) > 10:
+            return summary
+    except Exception:
+        logger.warning("_summarize_window: LLM fallback failed, using text-only")
+
+    # Fallback: user messages only, joined with pipe
+    user_parts = [p[6:80] for p in parts if p.startswith("user:") and len(p) > 16]
+    if user_parts:
+        return " | ".join(user_parts[-5:])
+    return f"Session {session_id}"
 
 
 def _msg_role(msg: object) -> str:

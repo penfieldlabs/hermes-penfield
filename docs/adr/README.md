@@ -18,4 +18,5 @@ the decision itself, and its consequences.
 | 8    | [No builtin memory mirror by default](0008-no-builtin-mirror-by-default.md) | Accepted |
 | 9    | [Real User-Agent required (Cloudflare)](0009-real-user-agent-required.md) | Accepted |
 | 10   | [Directory discovery, not pip entry points](0010-directory-discovery-not-entry-points.md) | Accepted |
-| 11   | [Context tools — partial, no MCP shim](0011-context-tools-partial-implementation.md) | Accepted |
+| 11   | [Context tools — full implementation, no MCP shim](0011-context-tools.md) | Accepted |
+| 12   | [on_pre_compress uses save_context for checkpoints](0012-pre-compress-save-context.md) | Accepted |

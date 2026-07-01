@@ -4,7 +4,7 @@
 
 These values are transcribed from the public Penfield docs
 (``github.com/penfieldlabs/docs``) and verified against the live
-``api-dev.penfield.app`` contract during v0.1.0 development. Keeping them
+``api-dev.penfield.app`` contract during v0.2.0 development. Keeping them
 in one module means the client, the tool schemas, and the tests share a
 single source of truth — there is exactly one place to change when an
 endpoint moves.
@@ -17,7 +17,7 @@ from __future__ import annotations
 # ---------------------------------------------------------------------------
 # Environments
 # ---------------------------------------------------------------------------
-# The user confirmed the convention during v0.1.0 development:
+# The user confirmed the convention during v0.2.0 development:
 #   prod -> bare hosts, dev -> *-dev hosts. See ADR-0010.
 PROD_HOSTS = {
     "api": "api.penfield.app",
@@ -91,7 +91,7 @@ REQUEST_TIMEOUT = 30.0
 # Refresh access tokens a little before they expire to avoid 401 races.
 REFRESH_SKEW_SECONDS = 300.0
 
-USER_AGENT = "hermes-penfield/0.1.0"
+USER_AGENT = "hermes-penfield/0.2.0"
 
 # ---------------------------------------------------------------------------
 # Enums (transcribed from docs/api/schemas/enums.md)
