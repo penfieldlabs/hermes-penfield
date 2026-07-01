@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (push-then-fix cycle).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Lint — runs ONCE, fast, as a standalone required check. Lint is
+  # version-independent so running it across the Python matrix is pure
+  # waste. A lint failure here blocks merge without waiting for tests.
+  # -----------------------------------------------------------------------
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff check (lint)
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Mypy (type check)
+        run: |
+          mkdir -p /tmp/penfield_src/penfield
+          cp __init__.py auth.py client.py config.py constants.py exceptions.py provider.py tools.py cli.py /tmp/penfield_src/penfield/
+          cd /tmp/penfield_src
+          mypy penfield/
+        shell: bash
+
+  # -----------------------------------------------------------------------
+  # Test — version matrix, coverage-gated. Depends on lint passing.
+  # -----------------------------------------------------------------------
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Pytest (unit + coverage gate)
+        # Coverage gate lives in pyproject.toml ([tool.coverage.report]
+        # fail_under = 80.00) and is enforced via pytest-cov reading that
+        # config. This step fails the build if coverage drops below the bar.
+        run: pytest -m "not integration" --tb=short
+
+  # -----------------------------------------------------------------------
+  # Integration — live dev-API round-trip. Dev-only by construction
+  # (triple failsafe in conftest.py: session gate, live_jwt fixture,
+  # live_client refuses non-dev). Skipped cleanly without creds. See
+  # ADR-0011.
+  # -----------------------------------------------------------------------
+  integration:
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Only run when dev creds are configured (repo secret). The test
+    # suite's own failsafes handle the no-creds case, but there's no
+    # point scheduling the job without the secret.
+    if: ${{ vars.RUN_INTEGRATION == 'true' }}
+    env:
+      PENFIELD_ENV: dev
+      PENFIELD_API_KEY: ${{ secrets.PENFIELD_DEV_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Integration tests (dev)
+        run: pytest -m integration --no-cov -v
+
+  # -----------------------------------------------------------------------
+  # Version-tag guard — a tag must match pyproject.toml's version.
+  # -----------------------------------------------------------------------
+  version-tag-guard:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Assert tag matches pyproject.toml version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION=$(python3 -c "
+          import tomllib, pathlib
+          d = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+          print(d['project']['version'])
+          ")
+          EXPECTED="v${VERSION}"
+          if [ "$TAG" != "$EXPECTED" ]; then
+            echo "::error::Tag '$TAG' does not match pyproject.toml version '$VERSION' (expected '$EXPECTED')"
+            exit 1
+          fi
+          echo "Tag '$TAG' matches pyproject.toml version '$VERSION'."

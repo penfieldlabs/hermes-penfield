@@ -1,0 +1,115 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 Penfield
+#
+# pyproject.toml for hermes-penfield
+# Built to the same quality bar as allelix (ruff + mypy + pytest coverage
+# gate, CI matrix). See CONTRIBUTING.md.
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-penfield"
+version = "0.1.0"
+description = "Penfield persistent memory provider for Hermes Agent"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [{ name = "penfieldlabs" }]
+maintainers = [
+    { name = "dial481", email = "248182468+dial481@users.noreply.github.com" },
+]
+keywords = ["penfield", "hermes", "memory", "llm", "agent", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# No runtime dependencies — stdlib only. This is a hard constraint (ADR-0002).
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.11",
+    "pre-commit>=3.7",
+    "pytest>=8.0",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    'tomli>=2.0; python_version < "3.11"',
+]
+
+# The standalone CLI binary. `hermes-penfield install`, `status`, etc. are
+# the user-facing surface — without this declaration none of the documented
+# commands exist (the v0.1.0-v0.1.0+3 round-4 bug: tests called main()
+# directly, so the suite stayed green while the binary was absent).
+
+# NOTE: no [project.entry-points."hermes_agent.plugins"]. Hermes discovers
+# memory providers by directory scan ($HERMES_HOME/plugins/<name>/), not
+# entry points — the general plugin path has no register_memory_provider on
+# its context, so an entry-point-only install silently never registers. Use
+# `hermes-penfield install` instead. See ADR-0014.
+
+[project.urls]
+Source = "https://github.com/penfieldlabs/hermes-penfield"
+Issues = "https://github.com/penfieldlabs/hermes-penfield/issues"
+Documentation = "https://docs.penfield.app"
+
+[tool.setuptools.packages.find]
+include = ["*"]
+exclude = ["tests*"]
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py310"
+line-length = 99
+include = ["*.py", "tests/**/*.py"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "N", "UP", "B", "SIM", "TCH", "RUF", "D", "ANN",
+]
+ignore = ["D203", "D213", "ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D", "ANN", "TC002", "TC003"]
+"docs/**/*.py" = ["D", "ANN"]
+"__init__.py" = ["N999"]
+"cli.py" = ["D103"]  # repo dir has hyphen; loaded by Hermes, not pip
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+# ---------------------------------------------------------------------------
+# Mypy — permissive baseline; ratchet later (mirrors allelix ADR approach).
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v --strict-markers --tb=short --cov=. --cov-branch --cov-report=term-missing --cov-fail-under=80"
+markers = [
+    "integration: marks tests that hit the live dev API (need PENFIELD_API_KEY + PENFIELD_ENV=dev)",
+    "slow: marks tests that are slow",
+]
+filterwarnings = [
+    "error::ResourceWarning",
+]
+
+# Starting floor for v0.1.0. The low-level client/auth/tools are fully
+# unit-tested; the provider layer carries documented risk (ADR-0007) and is
+# covered by smoke tests. Raise this as the integration seams harden.
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+precision = 2
+fail_under = 80.00

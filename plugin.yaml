@@ -1,0 +1,23 @@
+name: penfield
+version: 0.1.0
+description: "Penfield persistent memory for Hermes Agent — cross-session knowledge graph with hybrid search, typed connections, and artifact storage."
+requires_env: []
+provides_tools:
+  - penfield_awaken
+  - penfield_store
+  - penfield_recall
+  - penfield_search
+  - penfield_fetch
+  - penfield_update_memory
+  - penfield_connect
+  - penfield_disconnect
+  - penfield_explore
+  - penfield_reflect
+  - penfield_save_artifact
+  - penfield_retrieve_artifact
+  - penfield_list_artifacts
+  - penfield_delete_artifact
+  - penfield_list_contexts
+  - penfield_restore_context
+hooks:
+  - on_session_end
