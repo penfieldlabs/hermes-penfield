@@ -8,8 +8,11 @@ Design constraints (see ADR-0002):
   so the plugin installs cleanly into any Python 3.10+ environment without
   dependency conflicts. This is a hard requirement from the v1.0 spec.
 * **Client-side rate limiting.** Sliding 60s window at the documented RPM.
-* **Exponential backoff with jitter.** Retries 429 and 5xx; never retries
-  4xx client errors.
+* **Bounded retries.** 429 is always retried. 5xx and transport failures are
+  retried only when repeating the request cannot create a duplicate. Other
+  4xx errors are never retried.
+* **Safe from several threads.** The provider fetches in the background
+  while the agent makes tool calls.
 * **Envelope-aware.** Every successful API call returns
   ``{"status": "success", "data": ..., "meta": ...}``; this class unwraps
   ``data`` and raises typed errors on failure.
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -34,12 +38,15 @@ from .constants import (
     MAX_RETRIES,
     REQUEST_TIMEOUT,
     USER_AGENT,
+    WRITE_ONCE_ENDPOINTS,
 )
 from .exceptions import (
     APIError,
     AuthError,
+    AuthTransportError,
     NotFoundError,
     PenfieldError,
+    PermissionDeniedError,
     RateLimitError,
     ValidationError,
 )
@@ -78,6 +85,7 @@ class PenfieldClient:
         self._max_retries = max_retries
         # Sliding-window rate limiter state.
         self._request_times: list[float] = []
+        self._rate_lock = threading.Lock()
         # Allow tests to inject a fake sleep without monkeypatching globals.
         self._sleep = sleep or time.sleep
 
@@ -90,15 +98,17 @@ class PenfieldClient:
 
     def _enforce_rate_limit(self) -> None:
         """Block until we are under the RPM cap (sliding 60s window)."""
-        now = time.monotonic()
-        cutoff = now - 60.0
-        self._request_times = [t for t in self._request_times if t > cutoff]
-        if len(self._request_times) >= self._max_rpm:
-            # Sleep until the oldest request ages out of the window.
-            sleep_for = self._request_times[0] - cutoff
-            if sleep_for > 0:
-                self._sleep(sleep_for)
-        self._request_times.append(time.monotonic())
+        with self._rate_lock:
+            now = time.monotonic()
+            cutoff = now - 60.0
+            self._request_times = [t for t in self._request_times if t > cutoff]
+            sleep_for = 0.0
+            if len(self._request_times) >= self._max_rpm:
+                # Wait until the oldest request ages out of the window.
+                sleep_for = max(self._request_times[0] - cutoff, 0.0)
+            self._request_times.append(now + sleep_for)
+        if sleep_for > 0:
+            self._sleep(sleep_for)
 
     # ------------------------------------------------------------------
     # Primary request method
@@ -111,6 +121,8 @@ class PenfieldClient:
         body: dict[str, Any] | None = None,
         query: dict[str, Any] | None = None,
         timeout: float | None = None,
+        retries: int | None = None,
+        repeatable: bool | None = None,
     ) -> Any:
         """Make an authenticated request and return unwrapped ``data``.
 
@@ -121,7 +133,13 @@ class PenfieldClient:
                 ``"memory_create"``) or a literal path.
             body: JSON body (sent as ``application/json``).
             query: Query parameters, URL-encoded.
-            timeout: Per-request timeout override.
+            timeout: Per-request timeout override, in seconds.
+            retries: How many times to retry; defaults to the client's
+                ``max_retries``. ``0`` means a single attempt.
+            repeatable: Whether sending the request twice is harmless. When
+                false, a 5xx or transport failure is not retried because the
+                first attempt may have been applied. Defaults to true for
+                every method except ``POST``.
 
         Returns:
             The ``data`` field of the success envelope.
@@ -129,54 +147,65 @@ class PenfieldClient:
         Raises:
             APIError: On a non-retriable failure (mapped to subclasses).
             RateLimitError: On 429 after exhausting retries.
-            AuthError: If the auth header cannot be obtained.
+            AuthError: If the auth header cannot be obtained. An auth server
+                that does not answer is tried again like the request itself.
         """
         method = method.upper()
-        resolved = self._resolve_path(method, path)
-        url = self._build_url(resolved, query)
+        url = self._build_url(self._resolve_path(method, path), query)
         body_bytes = json.dumps(body).encode() if body is not None else None
-
+        if repeatable is None:
+            repeatable = method != "POST"
+        retries_left = self._max_retries if retries is None else retries
         delay = BACKOFF_BASE
-        last_exc: Exception | None = None
         refreshed = False  # refresh at most once per request
 
-        for attempt in range(self._max_retries + 1):
+        while True:
             self._enforce_rate_limit()
-            header = self._auth.get_header()
-            req = self._build_request(method, url, body_bytes, header)
-
             try:
-                with urllib.request.urlopen(req, timeout=timeout or self._timeout) as resp:
-                    raw = resp.read()
-                    return _unwrap(raw)
-            except urllib.error.HTTPError as exc:
-                status = exc.code
-                detail = self._read_error(exc)
-                last_exc = self._classify_error(status, detail, exc)
-
-                if status == 401 and not refreshed:
-                    # Token expired mid-flight; refresh once and retry.
-                    refreshed = True
-                    self._auth.refresh()
-                    continue
-                if status == 429 or status >= 500:
-                    if attempt == self._max_retries:
-                        raise last_exc from exc
-                    retry_after = self._retry_after(exc, delay)
-                    self._sleep(retry_after)
-                    delay = min(delay * BACKOFF_FACTOR, BACKOFF_MAX)
-                    continue
-                # Non-retriable client error.
-                raise last_exc from exc
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                last_exc = APIError(f"transport error: {exc}", status=0)
-                if attempt == self._max_retries:
-                    raise last_exc from exc
+                header = self._auth.get_header()
+            except AuthTransportError:
+                # Signing in changes nothing at Penfield, so it is safe to
+                # repeat whatever the request itself is.
+                if retries_left <= 0:
+                    raise
+                retries_left -= 1
                 self._sleep(delay)
                 delay = min(delay * BACKOFF_FACTOR, BACKOFF_MAX)
-
-        # Should be unreachable; loop exits via return or raise.
-        raise last_exc  # type: ignore[misc]
+                continue
+            req = self._build_request(method, url, body_bytes, header)
+            try:
+                with urllib.request.urlopen(req, timeout=timeout or self._timeout) as resp:
+                    return _unwrap(resp.read())
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+                wait = self._retry_after(exc, delay)
+                error = self._classify_error(status, self._read_error(exc))
+                if status == 401 and not refreshed:
+                    # The token was rejected before the request was processed;
+                    # get a fresh one and try once more.
+                    try:
+                        self._auth.refresh()
+                    except AuthTransportError:
+                        # The auth server did not answer. Wait and go round
+                        # again if attempts remain.
+                        if retries_left <= 0:
+                            raise
+                    else:
+                        refreshed = True
+                        continue
+                else:
+                    # A 429 was refused before it was processed, so it is
+                    # always safe to repeat. A 5xx may have been applied.
+                    retriable = status == 429 or (status >= 500 and repeatable)
+                    if not retriable or retries_left <= 0:
+                        raise error from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if not repeatable or retries_left <= 0:
+                    raise APIError(f"transport error: {exc}", status=0) from exc
+                wait = delay
+            retries_left -= 1
+            self._sleep(wait)
+            delay = min(delay * BACKOFF_FACTOR, BACKOFF_MAX)
 
     # ------------------------------------------------------------------
     # Endpoint-name convenience
@@ -188,6 +217,8 @@ class PenfieldClient:
         body: dict[str, Any] | None = None,
         query: dict[str, Any] | None = None,
         path_params: dict[str, str] | None = None,
+        timeout: float | None = None,
+        retries: int | None = None,
     ) -> Any:
         """Call an endpoint by its name in :data:`ENDPOINTS`.
 
@@ -197,6 +228,8 @@ class PenfieldClient:
             body: JSON request body.
             query: Query parameters.
             path_params: Values for ``{placeholders}`` in the path.
+            timeout: Per-request timeout override, in seconds.
+            retries: Retry count override; ``0`` means a single attempt.
         """
         if endpoint_name not in ENDPOINTS:
             raise APIError(f"unknown endpoint {endpoint_name!r}", status=0)
@@ -204,7 +237,15 @@ class PenfieldClient:
         if path_params:
             for key, val in path_params.items():
                 path = path.replace("{" + key + "}", urllib.parse.quote(str(val), safe=""))
-        return self.request(method, path, body=body, query=query)
+        return self.request(
+            method,
+            path,
+            body=body,
+            query=query,
+            timeout=timeout,
+            retries=retries,
+            repeatable=endpoint_name not in WRITE_ONCE_ENDPOINTS,
+        )
 
     # ------------------------------------------------------------------
     # Internals
@@ -243,17 +284,15 @@ class PenfieldClient:
         return urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
 
     def _read_error(self, exc: urllib.error.HTTPError) -> str:
+        """Read an error body and release its connection."""
         try:
             return exc.read().decode(errors="replace")
         except OSError:
             return ""
+        finally:
+            exc.close()
 
-    def _classify_error(
-        self,
-        status: int,
-        detail: str,
-        exc: urllib.error.HTTPError,
-    ) -> PenfieldError:
+    def _classify_error(self, status: int, detail: str) -> PenfieldError:
         """Map an HTTP error to a typed :class:`PenfieldError` subclass."""
         code: str | None = None
         request_id: str | None = None
@@ -264,6 +303,14 @@ class PenfieldClient:
             if isinstance(err, dict):
                 code = str(err.get("code")) if err.get("code") else None
                 message = str(err.get("message", message))
+                # A validation error says which field is wrong only here.
+                fields = err.get("field_errors")
+                if isinstance(fields, dict) and fields:
+                    reasons = "; ".join(
+                        f"{name}: {why[0] if isinstance(why, list) and why else why}"
+                        for name, why in fields.items()
+                    )
+                    message = f"{message} ({reasons})"
                 request_id = (
                     str(parsed.get("meta", {}).get("request_id"))
                     if isinstance(parsed.get("meta"), dict)
@@ -280,8 +327,10 @@ class PenfieldClient:
             rl = RateLimitError(retry_after=None)
             rl.args = (message,)
             return rl
-        if status in (401, 403):
+        if status == 401:
             return AuthError(f"{status}: {message}")
+        if status == 403:
+            return PermissionDeniedError(message, status=status, code=code, request_id=request_id)
         return APIError(message, status=status, code=code, request_id=request_id)
 
     @staticmethod

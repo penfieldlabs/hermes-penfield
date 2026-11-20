@@ -6,7 +6,106 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.2.0] — 2026-07-01
+## [0.3.0] - 2026-11-20
+
+Brings the plugin up to date with Hermes Agent 0.23 and with Penfield's
+current tool surface. Requires Hermes Agent 0.21.6 or newer.
+
+### Added
+- Works with Hermes's plugin host (`plugins.isolation: host`) as well as
+  in-process.
+- Recall indicator: Hermes shows how many memories were recalled for a turn.
+- A session that starts without the briefing writes a warning to Hermes's
+  log, with the reason.
+- `hermes memory status` shows the environment, API address, credentials
+  in use and behaviour settings.
+- `hermes memory setup penfield`, the command Hermes suggests after an
+  install, asks for the API key, checks it with Penfield before saving
+  it, and selects the provider. A key Penfield refuses is not saved.
+- `hermes penfield logout` revokes a browser sign-in at Penfield as well
+  as clearing the local token cache, and says when an API key is still in
+  use.
+- `penfield_reflect`: time windows `month`, `1d`, `7d`, `30d`, `90d`.
+- Recall results from uploaded documents carry the file name, the
+  document id and the surrounding text of the passage.
+- `penfield_list_artifacts`: `name_pattern` filter.
+- `penfield_restore_context`: accepts a checkpoint id as well as a name.
+- `penfield_save_context`: reports references that did not resolve, and
+  links the most recent memories when the description is too short to
+  search on.
+- Integration tests that run the plugin inside Hermes Agent 0.21.6,
+  0.22.7, 0.23.0 and Hermes `main`, weekly.
+- A snapshot of Penfield's MCP tool list, with tests that compare every
+  tool, parameter, type and default against it.
+- Python 3.14 support.
+
+### Changed
+- The provider now subclasses Hermes's `MemoryProvider`.
+- Hermes is never held up for long: session start waits at most 6
+  seconds for the briefing, a turn at most 2.5 seconds for recall, a
+  compression at most 8 seconds for its checkpoint. Tool calls time out
+  after 15 seconds with at most two retries.
+- The briefing is fetched once per session, in the background.
+- Auto-recall leaves saved checkpoints out.
+- Recall returns whole memories (up to 2,000 characters each) with tags,
+  type, importance and date. Auto-recall shows full memory ids.
+- `hermes penfield status` makes a request and reports whether the
+  credentials in use still work.
+- `hermes memory setup` asks for the API key only. The key and the
+  `PENFIELD_*` settings are read through Hermes, per profile.
+- A profile uses one login at a time, and an API key takes precedence
+  over a browser sign-in. While `PENFIELD_API_KEY` is set,
+  `hermes penfield login` does not start and a saved sign-in is not used.
+- The checkpoint saved before compression is off by default; set
+  `pre_compress_save` to turn it on. When on, it is built from the user's
+  own messages without a model call, is tagged `auto-checkpoint`, and its
+  name is returned to Hermes for the compression summary. Only the
+  primary agent saves one.
+- `penfield_search` is a semantic search: it ranks by meaning far more
+  than by shared words. It used to return the same results as
+  `penfield_recall`.
+- `mirror_builtin_writes` now updates and removes mirrored memories when
+  the built-in entry is edited or removed, and runs in the background.
+- `penfield_list_artifacts` takes `path_prefix`, as Penfield's MCP tool does.
+- `recall_threshold` is applied as a minimum search score. Default `0.25`.
+- Installing no longer asks for a dependency step: the plugin declares
+  none, and the repository has no `pyproject.toml` for Hermes to read as
+  one.
+- Python 3.11 is the oldest supported version.
+
+### Fixed
+- Requests that create a memory or a relationship are not repeated after
+  a timeout or server error, so a slow response can no longer store the
+  same thing twice.
+- A changed or removed API key takes effect at once. Tokens cached for
+  the previous key, or for a browser sign-in, were used until they could
+  no longer be refreshed, so memories could be read from and written to
+  the account the old key belonged to.
+- A sign-in the server did not answer is tried again, like any other
+  request. One dropped connection at session start used to leave the
+  whole session without the briefing.
+- Expired access tokens are refreshed before a request is sent.
+- A login code that expires or is refused, and a saved login that has
+  stopped working, are reported in plain words.
+- Several Hermes processes sharing one sign-in no longer invalidate each
+  other's refresh token.
+- The token cache is written atomically with owner-only permissions from
+  the start.
+- Checkpoint name checks, `penfield_list_contexts` filtering and paging
+  cover every saved checkpoint, however many there are.
+- `penfield_restore_context` honours `limit` and returns whole memories.
+- `penfield_recall` with `source_type="memory"` returned nothing. It now
+  returns memories and leaves uploaded documents out.
+- A tool call with a missing argument names the argument, and a request
+  the API rejects names the field and the reason.
+- The stored session id follows `/new`, `/resume` and compression.
+
+### Removed
+- The content filter on `penfield_store`. Hermes redacts credentials
+  before a provider sees them, and the filter refused ordinary text.
+- The `sync_turn_enabled` and `auth_method` settings, which had no effect.
+
+## [0.2.0] - 2026-07-01
 
 ### Added
 - save_context: full MCP parity with reference parsing, hybrid search
@@ -26,7 +125,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 - save_context deduplicates memory_ids and referenced_memories
 - save_context guards empty description
 - HERMES_HOME resolution defaults to ~/.hermes
-- input_schema → parameters (Hermes ABC expects "parameters")
+- input_schema renamed to parameters (Hermes expects "parameters")
 - Cloudflare User-Agent fix for OAuth form-encoded calls
 - OAuth refresh routing (API-key vs OAuth token endpoints)
 - Stale refresh token fallback to API-key re-exchange
@@ -36,7 +135,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 - Self-contained plugin (no pip install, no external deps)
 - Parameter names match MCP (from_memory, start_memory, etc.)
 
-## [0.1.0] — 2026-06-29
+## [0.1.0] - 2026-06-29
 
 Initial release. Self-contained Hermes Agent memory provider for Penfield.
 
@@ -49,6 +148,7 @@ Initial release. Self-contained Hermes Agent memory provider for Penfield.
 - Environment switching via `PENFIELD_ENV` (prod/dev)
 - Auto-awakening: persona and persistent context load on every session
 
-[Unreleased]: https://github.com/penfieldlabs/hermes-penfield/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/penfieldlabs/hermes-penfield/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.0
 [0.2.0]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.2.0
 [0.1.0]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.1.0

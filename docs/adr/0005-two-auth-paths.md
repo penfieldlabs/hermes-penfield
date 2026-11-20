@@ -1,7 +1,7 @@
 # ADR-0005: Two auth paths — API-key exchange and OAuth device flow
 
 - **Date:** 2026-06-29
-- **Status:** Accepted
+- **Status:** Accepted. Extended by [ADR-0023](0023-one-login-at-a-time.md).
 
 ## Context
 

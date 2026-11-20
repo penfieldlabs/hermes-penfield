@@ -1,0 +1,6 @@
+# Development tools. The plugin itself needs nothing beyond the standard library.
+mypy>=1.11
+pre-commit>=3.7
+pytest>=8.0
+pytest-cov>=5
+ruff>=0.6

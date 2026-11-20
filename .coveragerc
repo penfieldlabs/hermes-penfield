@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 Penfield
+#
+# Coverage is measured on the plugin's own modules, never on the tests.
+[run]
+branch = True
+omit = tests/*
+
+[report]
+precision = 2
+fail_under = 80.00

@@ -12,7 +12,18 @@ from __future__ import annotations
 
 from typing import Any
 
-__version__ = "0.2.0"
+
+def __getattr__(name: str) -> Any:
+    """Resolve ``__version__`` on demand.
+
+    This file has no module-level relative imports, so tooling that imports
+    it outside the package (pytest's collection, for one) still can.
+    """
+    if name == "__version__":
+        from .constants import VERSION
+
+        return VERSION
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def register(ctx: Any) -> None:

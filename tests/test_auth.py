@@ -8,7 +8,8 @@ import io
 import json
 import time
 import urllib.error
-from typing import Any
+import urllib.parse
+from typing import Any, ClassVar
 
 import pytest
 from penfield.auth import PenfieldAuth, TokenSet
@@ -215,6 +216,149 @@ class TestDeviceFlow:
         assert ts.access_token == "AT"
 
 
+def _oauth_refusal(code: str) -> urllib.error.HTTPError:
+    import http.client
+
+    return urllib.error.HTTPError(
+        url="https://auth-dev/token",
+        code=400,
+        msg=code,
+        hdrs=http.client.HTTPMessage(),
+        fp=io.BytesIO(json.dumps({"error": code}).encode()),
+    )
+
+
+class TestDeviceFlowFailures:
+    DISCOVERY: ClassVar[dict[str, str]] = {
+        "device_authorization_endpoint": "https://auth-dev/device",
+        "token_endpoint": "https://auth-dev/token",
+        "registration_endpoint": "https://auth-dev/reg",
+    }
+    DEVICE: ClassVar[dict[str, Any]] = {
+        "device_code": "DC",
+        "user_code": "UC",
+        "verification_uri_complete": "https://x/y?user_code=UC",
+        "interval": 0,
+        "expires_in": 600,
+    }
+
+    def _login(self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch, refusal: str) -> None:
+        responses: list[Any] = [
+            self.DISCOVERY,
+            self.DEVICE,
+            _oauth_refusal("authorization_pending"),
+            _oauth_refusal(refusal),
+        ]
+
+        def fake_urlopen(req: urllib.request.Request, timeout: float = 0) -> _Resp:
+            item = responses.pop(0)
+            if isinstance(item, urllib.error.HTTPError):
+                raise item
+            return _Resp(json.dumps(item).encode())
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        PenfieldAuth(_config(), tmp_path, tokens=None).device_code_flow(
+            client_id="CID", poll_interval_override=0
+        )
+
+    @pytest.mark.parametrize("refusal", ["expired_token", "invalid_grant"])
+    def test_an_expired_code_says_so(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch, refusal: str
+    ) -> None:
+        with pytest.raises(AuthError, match="expired before it was approved"):
+            self._login(tmp_path, monkeypatch, refusal)
+
+    def test_a_refused_sign_in_says_so(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with pytest.raises(AuthError, match="refused in the browser"):
+            self._login(tmp_path, monkeypatch, "access_denied")
+
+    def test_nothing_is_cached_after_a_failed_login(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with pytest.raises(AuthError):
+            self._login(tmp_path, monkeypatch, "access_denied")
+        assert not (tmp_path / "penfield" / "tokens.json").exists()
+
+    def test_the_link_is_shown_with_its_lifetime(
+        self,
+        tmp_path: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with pytest.raises(AuthError):
+            self._login(tmp_path, monkeypatch, "access_denied")
+        shown = capsys.readouterr().out
+        assert "https://x/y?user_code=UC" in shown
+        assert "valid for 10 minutes" in shown
+
+
+class TestLogout:
+    DISCOVERY: ClassVar[dict[str, str]] = {
+        "token_endpoint": "https://auth-dev/token",
+        "revocation_endpoint": "https://auth-dev/revoke",
+    }
+
+    def _signed_in(self, tmp_path: Any, source: str) -> PenfieldAuth:
+        tokens = TokenSet(
+            access_token="AT",
+            refresh_token="RT",
+            expires_at=time.time() + 3600,
+            source=source,
+            client_id="CID" if source == "oauth" else None,
+        )
+        auth = PenfieldAuth(_config(), tmp_path, tokens=tokens)
+        auth._persist()
+        return auth
+
+    def test_a_browser_sign_in_is_revoked_at_the_server(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[tuple[str, dict[str, list[str]]]] = []
+
+        def fake_urlopen(req: urllib.request.Request, timeout: float = 0) -> _Resp:
+            if req.full_url.endswith("oauth-authorization-server"):
+                return _Resp(json.dumps(self.DISCOVERY).encode())
+            sent.append((req.full_url, urllib.parse.parse_qs((req.data or b"").decode())))
+            return _Resp(b'{"status":"revoked"}')
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        auth = self._signed_in(tmp_path, "oauth")
+
+        assert auth.logout() is True
+
+        assert [url for url, _ in sent] == ["https://auth-dev/revoke"] * 2
+        assert [form["token"] for _, form in sent] == [["RT"], ["AT"]]
+        assert all(form["client_id"] == ["CID"] for _, form in sent)
+        assert not (tmp_path / "penfield" / "tokens.json").exists()
+        assert auth.is_authenticated() is False
+
+    def test_the_cache_is_cleared_even_when_the_server_is_unreachable(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_urlopen(req: urllib.request.Request, timeout: float = 0) -> _Resp:
+            raise urllib.error.URLError("no route")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        auth = self._signed_in(tmp_path, "oauth")
+
+        assert auth.logout() is False
+        assert not (tmp_path / "penfield" / "tokens.json").exists()
+
+    def test_tokens_from_an_api_key_are_forgotten_without_a_request(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_urlopen(req: urllib.request.Request, timeout: float = 0) -> _Resp:
+            raise AssertionError("no request expected")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        auth = self._signed_in(tmp_path, "api_key")
+
+        assert auth.logout() is False
+        assert not (tmp_path / "penfield" / "tokens.json").exists()
+
+
 class TestOAuthRefreshRouting:
     """OAuth-derived tokens must refresh via the OAuth token endpoint, not
     /auth/refresh. Pins the spec-compliance fix and the routing logic that
@@ -226,7 +370,7 @@ class TestOAuthRefreshRouting:
         tmp_path: Any,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # OAuth refresh hits {token_endpoint} (form-encoded) — NOT /auth/refresh.
+        # OAuth refresh hits {token_endpoint} (form-encoded), not /auth/refresh.
         captured: dict[str, Any] = {}
 
         def fake_urlopen(req: urllib.request.Request, timeout: float = 0) -> _Resp:

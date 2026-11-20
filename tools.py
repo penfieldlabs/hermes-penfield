@@ -1,26 +1,58 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026 Penfield
-"""Agent tool schemas and dispatch — mirrors the Penfield MCP surface.
+"""Agent tool schemas and dispatch, matching the Penfield MCP surface.
 
-17 tools (full MCP surface; see ADR-0011). Each maps 1:1 to an
-MCP tool with matching parameter names.
+17 tools, one for each tool of Penfield's MCP server, with the same
+parameter names. ``tests/test_surface.py`` compares the two and lists the
+few parameters the REST API cannot serve.
 """
 
 from __future__ import annotations
 
 import json
 import re as _re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from .constants import (
+    DOCUMENT_SOURCE_TYPE,
+    MEMORY_SOURCE_TYPES,
     RELATIONSHIP_TYPES,
+    SEMANTIC_SEARCH_WEIGHTS,
 )
+from .exceptions import NotFoundError, PenfieldError
 
 if TYPE_CHECKING:
     from .client import PenfieldClient
 
 _RELATIONSHIP_TYPE_ENUM = sorted(RELATIONSHIP_TYPES)
+
+#: Longest memory content a search or restore result carries per memory. The
+#: API allows 10,000 characters; longer results are cut and flagged, and the
+#: agent can read the rest with ``penfield_fetch``.
+RECALL_CONTENT_MAX_CHARS = 2000
+
+#: Time windows ``penfield_reflect`` accepts. The API knows the first four
+#: by name; the day counts are sent to it as a start date.
+REFLECT_WINDOWS = ("recent", "today", "week", "month", "1d", "7d", "30d", "90d")
+_DAY_WINDOWS = {"1d": 1, "7d": 7, "30d": 30, "90d": 90}
+
+#: A checkpoint description shorter than this many words is no use as a
+#: search query, so the most recent memories are linked instead.
+_DEFAULT_SEARCH_LIMIT = 10
+_MIN_QUERY_WORDS = 3
+_RECENT_FALLBACK = 20
+#: Lowest search score at which a checkpoint links a memory.
+_LINK_SCORE = 0.25
+
+_PAGE_SIZE = 100  # the API's maximum page size
+_MAX_CHECKPOINT_PAGES = 100
+_FETCH_WORKERS = 5
+_UUID_PATTERN = _re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", _re.IGNORECASE
+)
 
 
 def _enum_str(values: tuple[str, ...]) -> dict[str, list[str]]:
@@ -28,7 +60,7 @@ def _enum_str(values: tuple[str, ...]) -> dict[str, list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Tool schemas — mirrors the Penfield MCP tool list exactly
+# Tool schemas: the Penfield MCP tool list, with a penfield_ prefix
 # ---------------------------------------------------------------------------
 
 PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -68,8 +100,9 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "penfield_recall",
         "description": (
-            "Hybrid search (BM25 + vector + graph) across all memories. "
-            "Primary tool for retrieving prior context, decisions, or facts.\n"
+            "Hybrid search (keywords, meaning and graph links) across all "
+            "memories. Primary tool for retrieving prior context, decisions, "
+            "or facts, and the one to use for names, ids and exact phrases.\n"
             'Example: penfield_recall(query="user preferences", limit=5)\n'
             "IMPORTANT: Omit optional fields if not filtering. Do not pass "
             "empty strings for source_type. source_type accepts 'memory' or "
@@ -95,8 +128,10 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "penfield_search",
         "description": (
-            "Semantic search for fuzzy concept matching. Simpler than recall: "
-            "just query and limit. Use when you don't have exact terms.\n"
+            "Semantic search: ranks memories by meaning far more than by "
+            "shared words. Use it when you do not know how a memory was "
+            "worded, or when penfield_recall finds nothing useful. Takes a "
+            "query and a limit only.\n"
             'Example: penfield_search(query="async programming patterns")'
         ),
         "parameters": {
@@ -151,11 +186,6 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "knowledge graph. Both IDs must be valid memory UUIDs.\n"
             'Example: penfield_connect(from_memory="uuid-1", '
             'to_memory="uuid-2", relationship_type="supports")\n'
-            "Valid types: supports, contradicts, follows, precedes, "
-            "depends_on, references, supersedes, updates, parent_of, "
-            "child_of, sibling_of, composed_of, part_of, causes, "
-            "influenced_by, prerequisite_for, implements, documents, "
-            "tests, example_of, responds_to, inspired_by, evolution_of.\n"
             "IMPORTANT: Omit strength if not setting it."
         ),
         "parameters": {
@@ -224,8 +254,13 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "properties": {
                 "time_window": {
                     "type": "string",
-                    "enum": ["recent", "today", "week"],
+                    "enum": list(REFLECT_WINDOWS),
                     "default": "recent",
+                    "description": (
+                        "'recent' is the last 50 memories; 'today', 'week' and 'month' "
+                        "look back that far; '1d', '7d', '30d' and '90d' count days "
+                        "back from now."
+                    ),
                 },
                 "include_documents": {"type": "boolean", "default": False},
                 "start_date": {"type": "string", "description": "ISO 8601 date. Omit if unused."},
@@ -238,7 +273,7 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "penfield_save_artifact",
         "description": (
             "Save a file artifact (document, notes, code). Artifacts are NOT "
-            "searchable via recall/search — use store for searchable memories.\n"
+            "searchable via recall/search. Use store for searchable memories.\n"
             'Example: penfield_save_artifact(path="/project/notes.md", '
             'content="# Notes\\nImportant info")'
         ),
@@ -271,14 +306,20 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "penfield_list_artifacts",
         "description": (
-            "List stored files under a directory prefix.\n"
-            'Example: penfield_list_artifacts(prefix="/project/")\n'
-            "IMPORTANT: Omit prefix for root listing. Default is '/'."
+            "List the folders and files directly inside a directory (not recursive).\n"
+            'Example: penfield_list_artifacts(path_prefix="/project/")\n'
+            "IMPORTANT: Omit path_prefix to list the root."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "prefix": {"type": "string", "default": "/"},
+                "path_prefix": {"type": "string", "default": "/"},
+                "name_pattern": {
+                    "type": "string",
+                    "description": (
+                        "Case-insensitive substring filter on file and folder names. Omit for all."
+                    ),
+                },
             },
         },
     },
@@ -300,9 +341,12 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "penfield_save_context",
         "description": (
             "Create a checkpoint of cognitive state for session handoffs. "
-            "The description becomes the checkpoint summary and drives "
-            "which memories get linked. Include memory_id: UUID references "
-            "to link specific memories.\n"
+            "The description is the handoff narrative and also the search "
+            "that selects which memories get linked; a description under "
+            "three words links the 20 most recent memories instead. Link "
+            "specific memories with 'memory_id: UUID' (reliable) or "
+            "\"memory: 'a phrase'\" (best effort); the result lists any "
+            "reference that did not resolve.\n"
             'Example: penfield_save_context(name="API Investigation", '
             'description="Found auth bug in memory_id: 550e8400...")\n'
             "IMPORTANT: Names must be unique per tenant. Include a date "
@@ -385,16 +429,26 @@ def _tool(name: str) -> Callable[[Handler], Handler]:
 
 
 def dispatch(client: PenfieldClient, tool_name: str, args: dict[str, Any]) -> str:
-    """Dispatch a tool call and return a JSON string result."""
+    """Dispatch a tool call and return a JSON string result.
+
+    Raises:
+        ValueError: If the tool is unknown or a required argument is missing.
+            The message is written for the model that made the call.
+    """
     if tool_name not in _HANDLERS:
         raise ValueError(f"unknown tool {tool_name!r}")
-    # Sanitize: strip empty-string optionals LLMs send instead of omitting
-    required: set[str] = set()
+    if not isinstance(args, dict):
+        raise ValueError(f"{tool_name}: arguments must be a JSON object")
+    required: list[str] = []
     for schema in PENFIELD_TOOL_SCHEMAS:
         if schema["name"] == tool_name:
-            required = set(schema.get("parameters", {}).get("required", []))
+            required = list(schema.get("parameters", {}).get("required", []))
             break
-    sanitized = {k: v for k, v in args.items() if k in required or v not in ("", [], {}, None)}
+    # Models send "" or null for optionals they mean to omit; drop those.
+    sanitized = {k: v for k, v in args.items() if v not in ("", [], {}, None)}
+    for key in required:
+        if key not in sanitized:
+            raise ValueError(f"{tool_name}: missing required argument {key!r}")
     result = _HANDLERS[tool_name](client, sanitized)
     return json.dumps(result, default=_json_default)
 
@@ -413,42 +467,97 @@ def _awaken(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
 
 @_tool("penfield_store")
 def _store(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
-    content = str(args["content"])
-    _reject_secret_like(content)
-    body: dict[str, Any] = {"content": content}
+    body: dict[str, Any] = {"content": str(args["content"])}
     for key in ("tags", "importance"):
-        if key in args and args[key] is not None:
+        if key in args:
             body[key] = args[key]
     return client.call("memory_create", body=body)
 
 
+def _source_types(source_type: str) -> list[str]:
+    """Translate the tool's ``source_type`` into the API's ``source_types``.
+
+    The tool offers two filters, as Penfield's own tools do: ``memory``
+    (everything that is not an uploaded document) and ``document``.
+    """
+    if source_type == "document":
+        return [DOCUMENT_SOURCE_TYPE]
+    if source_type == "memory":
+        return list(MEMORY_SOURCE_TYPES)
+    raise ValueError("source_type must be 'memory' or 'document'; omit it to search both")
+
+
+def _search_body(args: dict[str, Any]) -> dict[str, Any]:
+    """Build a hybrid-search request body from tool arguments."""
+    body: dict[str, Any] = {"query": args["query"]}
+    if "limit" in args:
+        body["limit"] = int(args["limit"])
+    if args.get("source_type"):
+        body["source_types"] = _source_types(str(args["source_type"]))
+    if "tags" in args:
+        # The tool takes a list; the API takes a comma-separated string.
+        tags = args["tags"]
+        body["tags"] = ",".join(tags) if isinstance(tags, list) else str(tags)
+    for key in ("start_date", "end_date", "min_score_threshold"):
+        if key in args:
+            body[key] = args[key]
+    return body
+
+
+def search_memories(
+    client: PenfieldClient,
+    args: dict[str, Any],
+    *,
+    max_chars: int = RECALL_CONTENT_MAX_CHARS,
+    timeout: float | None = None,
+    retries: int | None = None,
+    weights: Mapping[str, float] | None = None,
+) -> dict[str, Any]:
+    """Run a hybrid search and return agent-facing results.
+
+    Shared by the recall and search tools and the provider's auto-recall,
+    which passes a short ``timeout`` and ``retries=0`` because it runs
+    before every turn. ``weights`` replaces the API's default balance
+    between keywords, meaning and graph links.
+    """
+    options: dict[str, Any] = {}
+    if timeout is not None:
+        options["timeout"] = timeout
+    if retries is not None:
+        options["retries"] = retries
+    body = _search_body(args)
+    body.update(weights or {})
+    items = _search_items(client, body, options)
+    if not items and args.get("source_type") == "memory":
+        # An empty answer can also mean the API has stopped accepting one of
+        # the source types sent. Search again without them and leave the
+        # documents out here.
+        wanted = int(body.get("limit") or _DEFAULT_SEARCH_LIMIT)
+        del body["source_types"]
+        body["limit"] = min(wanted * 3, _PAGE_SIZE)
+        found = _search_items(client, body, options)
+        items = [it for it in found if it.get("source_type") != DOCUMENT_SOURCE_TYPE][:wanted]
+    shaped = [_memory_view(it, max_chars=max_chars) for it in items]
+    return {"items": shaped, "count": len(shaped)}
+
+
+def _search_items(
+    client: PenfieldClient, body: dict[str, Any], options: dict[str, Any]
+) -> list[dict[str, Any]]:
+    response = client.call("search_hybrid", body=body, **options)
+    items = response.get("items", []) if isinstance(response, dict) else []
+    return [it for it in items if isinstance(it, dict)]
+
+
 @_tool("penfield_recall")
 def _recall(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
-    body: dict[str, Any] = {"query": args["query"]}
-    if args.get("limit") is not None:
-        body["limit"] = args["limit"]
-    # MCP → REST translations (the MCP server does these internally).
-    # source_type (MCP string) → source_types (REST array)
-    if args.get("source_type") is not None:
-        body["source_types"] = [args["source_type"]]
-    # tags (MCP array) → tags (REST comma-separated string)
-    if args.get("tags") is not None:
-        tags_val = args["tags"]
-        body["tags"] = ",".join(tags_val) if isinstance(tags_val, list) else tags_val
-    for key in ("start_date", "end_date"):
-        if key in args and args[key] is not None:
-            body[key] = args[key]
-    items = client.call("search_hybrid", body=body)
-    return _search_result(items)
+    return search_memories(client, args)
 
 
 @_tool("penfield_search")
 def _search(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
-    body = {"query": args["query"]}
-    if args.get("limit") is not None:
-        body["limit"] = args["limit"]
-    items = client.call("search_hybrid", body=body)
-    return _search_result(items)
+    wanted: dict[str, Any] = {k: args[k] for k in ("query", "limit") if k in args}
+    return search_memories(client, wanted, weights=SEMANTIC_SEARCH_WEIGHTS)
 
 
 @_tool("penfield_fetch")
@@ -459,7 +568,7 @@ def _fetch(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
 @_tool("penfield_update_memory")
 def _update_memory(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
     memory_id = args["memory_id"]
-    body = {k: v for k, v in args.items() if k != "memory_id" and v is not None}
+    body: dict[str, Any] = {k: args[k] for k in ("content", "importance", "tags") if k in args}
     if not body:
         raise ValueError("penfield_update_memory requires at least one field to update")
     return client.call("memory_update", path_params={"memory_id": memory_id}, body=body)
@@ -504,10 +613,20 @@ def _explore(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
 
 @_tool("penfield_reflect")
 def _reflect(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
+    window = args.get("time_window")
+    if window is not None and window not in REFLECT_WINDOWS:
+        raise ValueError(f"time_window must be one of {', '.join(REFLECT_WINDOWS)}")
     body: dict[str, Any] = {}
-    for key in ("time_window", "include_documents", "start_date", "end_date"):
-        if key in args and args[key] is not None:
+    for key in ("include_documents", "start_date", "end_date"):
+        if args.get(key) is not None:
             body[key] = args[key]
+    if window in _DAY_WINDOWS:
+        # Explicit dates override any window, so only fill in a missing start.
+        if "start_date" not in body and "end_date" not in body:
+            since = datetime.now(UTC) - timedelta(days=_DAY_WINDOWS[window])
+            body["start_date"] = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+    elif window is not None:
+        body["time_window"] = window
     return client.call("analysis_reflect", body=body)
 
 
@@ -526,12 +645,16 @@ def _retrieve_artifact(client: PenfieldClient, args: dict[str, Any]) -> dict[str
 
 @_tool("penfield_list_artifacts")
 def _list_artifacts(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
-    return client.call("artifact_list", query={"prefix": args.get("prefix", "/")})
+    # The tool uses the MCP parameter name; the API calls it ``prefix``.
+    query: dict[str, Any] = {"prefix": args.get("path_prefix") or "/"}
+    if args.get("name_pattern"):
+        query["name_pattern"] = args["name_pattern"]
+    return client.call("artifact_list", query=query)
 
 
 # ---------------------------------------------------------------------------
-# save_context — reimplements MCP server enrichment via REST
-# See docs/save-context-research.md for the verified behavior.
+# Context checkpoints. The REST API has no checkpoint endpoints, so these
+# tools build them from memories and search. See ADR-0011.
 # ---------------------------------------------------------------------------
 
 
@@ -544,112 +667,91 @@ def _parse_memory_refs(description: str) -> tuple[list[str], list[str]]:
 
     Returns (uuid_refs, phrase_refs).
     """
-    uuids = _MEMORY_ID_PATTERN.findall(description)
+    uuids = [u.lower() for u in _MEMORY_ID_PATTERN.findall(description)]
     phrases = _MEMORY_PHRASE_PATTERN.findall(description)
     return uuids, phrases
 
 
 @_tool("penfield_save_context")
 def _save_context(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
+    return save_checkpoint(client, str(args["name"]), str(args.get("description", "")))
+
+
+def save_checkpoint(
+    client: PenfieldClient,
+    name: str,
+    description: str,
+    *,
+    unique: bool = True,
+    extra_tags: Sequence[str] = (),
+) -> dict[str, Any]:
     """Create a checkpoint of cognitive state.
 
-    Mirrors the MCP save_context tool: creates a checkpoint-type memory
-    with a structured JSON content containing the name, description, recent
-    memory IDs, and resolved references. Enforces name uniqueness.
+    Does what Penfield's own ``save_context`` tool does, over the REST API:
+    stores a checkpoint-type memory whose JSON content holds the name, the
+    description, the memories that match the description, and the memories
+    the description refers to explicitly.
+
+    Args:
+        client: API client.
+        name: Checkpoint name, used later by restore_context.
+        description: Narrative handoff. Also the search query that selects
+            the memories the checkpoint links.
+        unique: Refuse a name an existing checkpoint already uses. Callers
+            that generate a fresh name every time can skip the lookup.
+        extra_tags: Tags added to the standard checkpoint tags.
     """
-    name = args["name"]
-    description = args.get("description", "")
+    # 1. Names are unique across every checkpoint, however old.
+    if unique:
+        for _item, saved in _iter_checkpoints(client):
+            if saved.get("checkpoint_name") == name:
+                return {
+                    "success": False,
+                    "error": f"Context name '{name}' already exists. Use a unique name.",
+                    "error_code": "DUPLICATE_NAME",
+                }
 
-    # 1. Check name uniqueness: query existing checkpoints for exact name
-    existing = client.call(
-        "memory_list",
-        query={
-            "memory_type": "checkpoint",
-            "per_page": 100,
-        },
-    )
-    if isinstance(existing, dict):
-        for item in existing.get("items", []):
-            try:
-                content = json.loads(item.get("content", "{}"))
-                if content.get("checkpoint_name") == name:
-                    return {
-                        "success": False,
-                        "error": f"Context name '{name}' already exists. Use a unique name.",
-                        "error_code": "DUPLICATE_NAME",
-                    }
-            except (json.JSONDecodeError, TypeError):
-                continue
-
-    # 2. Gather related memories via hybrid search against the description
-    # (matches MCP server behavior: search first 200 chars of description,
-    # limit=30, min_score_threshold=0.25, fallback to recent 20 on error)
-    search_query = description[:200] if description.strip() else name
+    # 2. Link the memories the description is about. A description too short
+    # to search on, or a search that fails, links the most recent ones.
     memory_ids: list[str] = []
-    try:
-        search_results = client.call(
-            "search_hybrid",
-            body={
-                "query": search_query,
-                "limit": 30,
-                "min_score_threshold": 0.25,
-            },
-        )
-        if isinstance(search_results, dict):
-            for item in search_results.get("items", []):
-                score = item.get("score", 0)
-                if isinstance(score, (int, float)) and score >= 0.25:
-                    mid = item.get("id")
-                    if mid:
-                        memory_ids.append(mid)
-    except Exception:
-        # Fallback: grab 20 most recent memories (error handling only)
+    searched = False
+    if len(description.split()) >= _MIN_QUERY_WORDS:
+        try:
+            memory_ids = _matching_ids(client, description[:200], limit=30)
+            searched = True
+        except PenfieldError:
+            searched = False
+    if not searched:
         recent = client.call(
-            "memory_list",
-            query={
-                "sort": "-created_at",
-                "per_page": 20,
-            },
+            "memory_list", query={"sort": "-created_at", "per_page": _RECENT_FALLBACK}
         )
-        if isinstance(recent, dict):
-            for item in recent.get("items", []):
-                mid = item.get("id")
-                if mid:
-                    memory_ids.append(mid)
+        items = recent.get("items", []) if isinstance(recent, dict) else []
+        memory_ids = [str(it["id"]) for it in items if isinstance(it, dict) and it.get("id")]
 
-    # 3. Parse references from description
+    # 3. Resolve the references written into the description.
     uuid_refs, phrase_refs = _parse_memory_refs(description)
-    refs_extracted = len(uuid_refs) + len(phrase_refs)
-
-    # 4. Resolve references and deduplicate against search results
     seen = set(memory_ids)
     referenced_memories: list[str] = []
-    for mid in uuid_refs:
-        if mid not in seen:
-            seen.add(mid)
-            referenced_memories.append(mid)
-
-    for phrase in phrase_refs:
+    unresolved: list[str] = []
+    existing = {str(m.get("id")) for m in _fetch_memories(client, list(dict.fromkeys(uuid_refs)))}
+    for memory_id in dict.fromkeys(uuid_refs):
+        if memory_id not in existing:
+            unresolved.append(f"memory_id: {memory_id}")
+        elif memory_id not in seen:
+            seen.add(memory_id)
+            referenced_memories.append(memory_id)
+    for phrase in dict.fromkeys(phrase_refs):
         try:
-            results = client.call(
-                "search_hybrid",
-                body={
-                    "query": phrase,
-                    "limit": 1,
-                    "min_score_threshold": 0.25,
-                },
-            )
-            if isinstance(results, dict):
-                items = results.get("items", [])
-                if items and items[0].get("score", 0) >= 0.25:
-                    mid = items[0].get("id")
-                    if mid and mid not in seen:
-                        seen.add(mid)
-                        referenced_memories.append(mid)
-        except Exception:
-            pass  # best-effort; silently skip unresolved
-
-    refs_resolved = len(referenced_memories)
+            match = _matching_ids(client, phrase, limit=1)
+        except PenfieldError:
+            match = []
+        if not match:
+            unresolved.append(f"memory: '{phrase}'")
+        elif match[0] not in seen:
+            seen.add(match[0])
+            referenced_memories.append(match[0])
+    refs_extracted = len(set(uuid_refs)) + len(set(phrase_refs))
+    refs_resolved = refs_extracted - len(unresolved)
 
     # 5. Create the checkpoint memory
     content = json.dumps(
@@ -668,7 +770,7 @@ def _save_context(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any
             "content": content,
             "memory_type": "checkpoint",
             "importance": 0.9,
-            "tags": ["checkpoint", "context", name],
+            "tags": ["checkpoint", "context", name, *extra_tags],
         },
     )
 
@@ -683,8 +785,26 @@ def _save_context(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any
         "name": name,
         "references_extracted": refs_extracted,
         "references_resolved": refs_resolved,
+        "unresolved_references": unresolved,
         "referenced_memories": referenced_memories,
     }
+
+
+def _matching_ids(client: PenfieldClient, query: str, *, limit: int) -> list[str]:
+    """Return ids of the memories that match ``query`` well enough to link."""
+    found = client.call(
+        "search_hybrid",
+        body={"query": query, "limit": limit, "min_score_threshold": _LINK_SCORE},
+    )
+    items = found.get("items", []) if isinstance(found, dict) else []
+    return [
+        str(it["id"])
+        for it in items
+        if isinstance(it, dict)
+        and it.get("id")
+        and isinstance(it.get("score"), (int, float))
+        and it["score"] >= _LINK_SCORE
+    ]
 
 
 @_tool("penfield_delete_artifact")
@@ -693,167 +813,135 @@ def _delete_artifact(client: PenfieldClient, args: dict[str, Any]) -> dict[str, 
     return {"deleted": True, "path": args["path"]}
 
 
+def _checkpoint_payload(item: dict[str, Any]) -> dict[str, Any]:
+    """Parse the JSON a checkpoint memory stores as its content."""
+    try:
+        parsed = json.loads(item.get("content") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _iter_checkpoints(client: PenfieldClient) -> Iterator[tuple[dict[str, Any], dict[str, Any]]]:
+    """Yield ``(memory, payload)`` for every checkpoint, newest first.
+
+    The API returns at most 100 memories per page, so this walks pages until
+    the API reports no more.
+    """
+    for page in range(1, _MAX_CHECKPOINT_PAGES + 1):
+        resp = client.call(
+            "memory_list",
+            query={"memory_type": "checkpoint", "per_page": _PAGE_SIZE, "page": page},
+        )
+        items = resp.get("items", []) if isinstance(resp, dict) else []
+        for item in items:
+            if isinstance(item, dict):
+                yield item, _checkpoint_payload(item)
+        pagination = resp.get("pagination", {}) if isinstance(resp, dict) else {}
+        if not items or not pagination.get("has_next", len(items) == _PAGE_SIZE):
+            return
+
+
 @_tool("penfield_list_contexts")
 def _list_contexts(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
-    """List checkpoint-type memories.
+    """List saved contexts, newest first.
 
-    Maps to GET /memories?memory_type=checkpoint. The REST API doesn't
-    support name_pattern or include_descriptions natively (those are
-    MCP-server enrichments), so we filter client-side.
+    The API has no name filter and pages by number, so the filter, ``offset``
+    and ``total`` are applied here over the full list of checkpoints.
     """
-    limit = int(args.get("limit", 20))
-    offset = int(args.get("offset", 0))
-    name_pattern = args.get("name_pattern", "")
-    include_descs = args.get("include_descriptions", False)
+    limit = max(int(args.get("limit", 20)), 1)
+    offset = max(int(args.get("offset", 0)), 0)
+    pattern = str(args.get("name_pattern", "")).lower()
+    with_descriptions = bool(args.get("include_descriptions", False))
 
-    # REST API uses page/per_page, not limit/offset
-    page = (offset // limit) + 1
-    resp = client.call(
-        "memory_list",
-        query={
-            "memory_type": "checkpoint",
-            "per_page": limit,
-            "page": page,
-        },
-    )
-
-    items = resp.get("items", []) if isinstance(resp, dict) else []
-    # Client-side name_pattern filter (REST API doesn't support it)
-    if name_pattern:
-        name_lower = name_pattern.lower()
-        filtered: list[Any] = []
-        for it in items:
-            try:
-                cname = json.loads(it.get("content", "{}")).get("checkpoint_name", "")
-            except (json.JSONDecodeError, TypeError):
-                cname = ""
-            if name_lower in cname.lower():
-                filtered.append(it)
-        items = filtered
-
-    # Format to MCP-like context shape
-    contexts = []
-    for it in items:
-        # Parse the JSON content to extract checkpoint_name
-        try:
-            content = json.loads(it.get("content", "{}"))
-            ctx_name = content.get("checkpoint_name", str(it.get("content", ""))[:100])
-            ctx_count = content.get("memory_count", 0)
-        except (json.JSONDecodeError, TypeError):
-            ctx_name = str(it.get("content", ""))[:100]
-            ctx_count = 0
-        ctx = {
-            "id": it.get("id"),
-            "name": ctx_name,
-            "memory_count": ctx_count,
-            "created": it.get("created_at"),
+    matches = []
+    for item, saved in _iter_checkpoints(client):
+        name = str(saved.get("checkpoint_name") or str(item.get("content", ""))[:100])
+        if pattern and pattern not in name.lower():
+            continue
+        context = {
+            "id": item.get("id"),
+            "name": name,
+            "memory_count": saved.get("memory_count", 0),
+            "created": item.get("created_at"),
         }
-        if include_descs:
-            try:
-                ctx["description"] = json.loads(it.get("content", "{}")).get(
-                    "description", it.get("content", "")
-                )
-            except (json.JSONDecodeError, TypeError):
-                ctx["description"] = it.get("content", "")
-        contexts.append(ctx)
+        if with_descriptions:
+            context["description"] = saved.get("description", item.get("content", ""))
+        matches.append(context)
 
     return {
-        "contexts": contexts,
-        "total": resp.get("pagination", {}).get("total", len(contexts))
-        if isinstance(resp, dict)
-        else len(contexts),
+        "contexts": matches[offset : offset + limit],
+        "total": len(matches),
         "limit": limit,
         "offset": offset,
     }
 
 
+def _find_checkpoint(client: PenfieldClient, name: str) -> dict[str, Any] | None:
+    """Find a checkpoint memory by exact name, or by its id."""
+    if _UUID_PATTERN.fullmatch(name):
+        try:
+            found = client.call("memory_get", path_params={"memory_id": name})
+        except NotFoundError:
+            found = None
+        if isinstance(found, dict) and found.get("memory_type") == "checkpoint":
+            return found
+    for item, saved in _iter_checkpoints(client):
+        if saved.get("checkpoint_name") == name:
+            return item
+    return None
+
+
+def _fetch_memories(client: PenfieldClient, memory_ids: list[str]) -> list[dict[str, Any]]:
+    """Fetch memories by id, a few at a time, keeping the given order.
+
+    Memories that no longer exist are left out.
+    """
+
+    def fetch(memory_id: str) -> dict[str, Any] | None:
+        try:
+            found = client.call("memory_get", path_params={"memory_id": memory_id})
+        except PenfieldError:
+            return None
+        return found if isinstance(found, dict) else None
+
+    if not memory_ids:
+        return []
+    with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(memory_ids))) as pool:
+        return [m for m in pool.map(fetch, memory_ids) if m is not None]
+
+
 @_tool("penfield_restore_context")
 def _restore_context(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
-    """Restore a checkpoint by name.
+    """Restore a saved context by name or id.
 
-    Special case: name='awakening' loads personality config.
-    Otherwise: find the checkpoint by name, parse its saved memory_ids,
-    and fetch those specific memories — not a fresh search.
+    Returns the saved description and the memories the checkpoint recorded,
+    up to ``limit``. The name ``awakening`` returns the personality briefing.
     """
-    name = args["name"]
-    limit = int(args.get("limit", 20))
+    name = str(args["name"])
+    limit = max(int(args.get("limit", 20)), 1)
 
-    # Special case: awakening loads personality config
     if name.lower() == "awakening":
         return client.call("personality_awakening")
 
-    # 1. Find the checkpoint by exact name match (not fuzzy search)
-    checkpoint_id = None
-    page = 1
-    while page <= 10:  # paginate up to 1000 checkpoints
-        resp = client.call(
-            "memory_list",
-            query={
-                "memory_type": "checkpoint",
-                "per_page": 100,
-                "page": page,
-            },
-        )
-        items = resp.get("items", []) if isinstance(resp, dict) else []
-        if not items:
-            break
-        for item in items:
-            try:
-                c = json.loads(item.get("content", "{}"))
-                if c.get("checkpoint_name") == name:
-                    checkpoint_id = item.get("id")
-                    break
-            except (json.JSONDecodeError, TypeError):
-                continue
-        if checkpoint_id:
-            break
-        page += 1
-
-    if not checkpoint_id:
+    checkpoint = _find_checkpoint(client, name)
+    if checkpoint is None:
         return {"error": f"No checkpoint found with name '{name}'"}
 
-    # 2. Fetch the full checkpoint to get its saved memory_ids
-    checkpoint = client.call("memory_get", path_params={"memory_id": checkpoint_id})
-    content: dict[str, Any] = {}
-    try:
-        content = json.loads(checkpoint.get("content", "{}"))
-        saved_ids = content.get("memory_ids", [])
-        referenced = content.get("referenced_memories", [])
-        description = content.get("description", "")
-    except (json.JSONDecodeError, TypeError):
-        saved_ids = []
-        referenced = []
-        description = checkpoint.get("content", "")
-
-    # 3. Fetch the actual saved memories (not a fresh search)
-    memories = []
-    # No artificial cap — restore the full saved set. The limit parameter
-    # controls max memories to return, but defaults high enough to cover
-    # typical checkpoints. Caller can lower it for large sets.
-    effective_limit = max(limit, len(saved_ids + referenced))
-    fetch_ids = (saved_ids + referenced)[:effective_limit]
-    for mid in fetch_ids:
-        try:
-            mem = client.call("memory_get", path_params={"memory_id": mid})
-            memories.append(
-                {
-                    "id": mem.get("id"),
-                    "content": str(mem.get("content", ""))[:200],
-                    "memory_type": mem.get("memory_type"),
-                    "created_at": mem.get("created_at"),
-                }
-            )
-        except Exception:
-            pass  # skip deleted/inaccessible memories
+    saved = _checkpoint_payload(checkpoint)
+    saved_ids = [str(m) for m in saved.get("memory_ids") or []]
+    referenced = [str(m) for m in saved.get("referenced_memories") or []]
+    all_ids = list(dict.fromkeys(saved_ids + referenced))
+    memories = [_memory_view(m) for m in _fetch_memories(client, all_ids[:limit])]
 
     return {
-        "context_id": checkpoint_id,
-        "name": content.get("checkpoint_name", name),
-        "description": description,
+        "context_id": checkpoint.get("id"),
+        "name": saved.get("checkpoint_name", name),
+        "description": saved.get("description", checkpoint.get("content", "")),
         "memories": memories,
         "count": len(memories),
-        "saved_count": len(saved_ids),
-        "truncated": len(saved_ids + referenced) > limit,
+        "saved_count": len(all_ids),
+        "truncated": len(all_ids) > limit,
     }
 
 
@@ -861,40 +949,46 @@ def _restore_context(client: PenfieldClient, args: dict[str, Any]) -> dict[str, 
 # Helpers
 # ---------------------------------------------------------------------------
 
-_SECRET_PATTERNS = (
-    "-----BEGIN ",
-    "ghp_",
-    "github_pat_",
-    "xoxb-",
-    "AKIA",
-    "sk-",
-    "sk_live_",
-    "tm_pf_",
-)
 
+def _memory_view(
+    memory: dict[str, Any], *, max_chars: int = RECALL_CONTENT_MAX_CHARS
+) -> dict[str, Any]:
+    """Shape one memory for the agent: whole content, capped, with its metadata.
 
-def _reject_secret_like(content: str) -> None:
-    lowered = content.lower()
-    for pat in _SECRET_PATTERNS:
-        if pat.lower() in lowered:
-            raise ValueError(
-                f"content appears to contain a secret (matched {pat!r}); refusing to store."
-            )
+    Accepts both a search hit (fields under ``metadata``) and a memory record
+    (fields at the top level). Content longer than ``max_chars`` is cut and
+    flagged so the agent knows to fetch the rest by id.
+    """
+    raw_meta = memory.get("metadata")
+    meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+    is_document = memory.get("source_type") == DOCUMENT_SOURCE_TYPE
+    # A document hit is one chunk; the API also sends it with its neighbours.
+    content = str(
+        (memory.get("content_with_context") if is_document else None)
+        or memory.get("content")
+        or memory.get("snippet")
+        or ""
+    )
 
+    def field(name: str) -> Any:
+        value = memory.get(name)
+        return value if value is not None else meta.get(name)
 
-def _search_result(response: Any) -> dict[str, Any]:
-    """Normalize hybrid-search responses to a compact agent-facing shape."""
-    if not isinstance(response, dict):
-        return {"items": response}
-    items = response.get("items", [])
-    slim = [
-        {
-            "id": it.get("id"),
-            "score": it.get("score"),
-            "snippet": it.get("snippet") or (str(it.get("content", ""))[:200]),
-            "memory_type": (it.get("metadata") or {}).get("memory_type"),
-        }
-        for it in items
-        if isinstance(it, dict)
-    ]
-    return {"items": slim, "count": len(slim)}
+    view: dict[str, Any] = {
+        "id": memory.get("id"),
+        "content": content[:max_chars],
+        "memory_type": field("memory_type"),
+        "importance": field("importance"),
+        "tags": field("tags") or [],
+        "created_at": field("created_at"),
+    }
+    if is_document:
+        view["source_type"] = "document"
+        for key in ("filename", "document_id", "chunk_index", "total_chunks"):
+            if field(key) is not None:
+                view[key] = field(key)
+    if "score" in memory:
+        view["score"] = memory["score"]
+    if len(content) > max_chars:
+        view["truncated"] = True
+    return view

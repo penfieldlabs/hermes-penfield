@@ -1,33 +1,22 @@
-# hermes-penfield pre-commit hooks
+# Run the same checks as CI before each commit.
 #
-# Install once after cloning:
-#   pip install -e ".[dev]"
-#   pre-commit install --hook-type pre-commit
+# Set up once after cloning:
+#   pip install -r requirements-dev.txt
+#   pre-commit install
 
 repos:
   - repo: local
     hooks:
-      - id: ruff-check
-        name: ruff check
-        entry: ruff check
+      - id: lint
+        name: ruff check and format
+        entry: make lint
         language: system
         types: [python]
         pass_filenames: false
-        stages: [pre-commit]
 
-      - id: ruff-format
-        name: ruff format --check
-        entry: ruff format --check
-        language: system
-        types: [python]
-        pass_filenames: false
-        stages: [pre-commit]
-
-      - id: mypy
+      - id: typecheck
         name: mypy
-        entry: mypy
+        entry: make typecheck
         language: system
         types: [python]
         pass_filenames: false
-        stages: [pre-commit]
-        args: [auth.py, client.py, config.py, constants.py, exceptions.py, provider.py, tools.py, cli.py, __init__.py]

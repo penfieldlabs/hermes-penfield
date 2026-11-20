@@ -2,142 +2,168 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
     tags: ["v*"]
   pull_request:
-    branches: [main, dev]
+  schedule:
+    # Weekly, so a change in Hermes Agent's main branch that breaks the
+    # plugin shows up here within seven days.
+    - cron: "17 5 * * 1"
   workflow_dispatch:
 
-# Cancel superseded runs on the same ref (push-then-fix cycle).
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # -----------------------------------------------------------------------
-  # Lint — runs ONCE, fast, as a standalone required check. Lint is
-  # version-independent so running it across the Python matrix is pure
-  # waste. A lint failure here blocks merge without waiting for tests.
-  # -----------------------------------------------------------------------
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.14"
           cache: pip
+          cache-dependency-path: requirements-dev.txt
 
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -r requirements-dev.txt
 
-      - name: Ruff check (lint)
-        run: ruff check .
+      - name: Ruff
+        run: make lint
 
-      - name: Ruff format check
-        run: ruff format --check .
+      - name: Mypy
+        run: make typecheck
 
-      - name: Mypy (type check)
-        run: |
-          mkdir -p /tmp/penfield_src/penfield
-          cp __init__.py auth.py client.py config.py constants.py exceptions.py provider.py tools.py cli.py /tmp/penfield_src/penfield/
-          cd /tmp/penfield_src
-          mypy penfield/
-        shell: bash
-
-  # -----------------------------------------------------------------------
-  # Test — version matrix, coverage-gated. Depends on lint passing.
-  # -----------------------------------------------------------------------
-  test:
-    needs: lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Pytest (unit + coverage gate)
-        # Coverage gate lives in pyproject.toml ([tool.coverage.report]
-        # fail_under = 80.00) and is enforced via pytest-cov reading that
-        # config. This step fails the build if coverage drops below the bar.
-        run: pytest -m "not integration" --tb=short
-
-  # -----------------------------------------------------------------------
-  # Integration — live dev-API round-trip. Dev-only by construction
-  # (triple failsafe in conftest.py: session gate, live_jwt fixture,
-  # live_client refuses non-dev). Skipped cleanly without creds. See
-  # ADR-0011.
-  # -----------------------------------------------------------------------
-  integration:
+  # Unit tests: no Hermes install needed. Hermes Agent itself runs on 3.14;
+  # the older versions cover installs that have not moved yet.
+  unit:
     needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Only run when dev creds are configured (repo secret). The test
-    # suite's own failsafes handle the no-creds case, but there's no
-    # point scheduling the job without the secret.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Unit tests with coverage gate
+        run: make test
+
+  # The plugin inside a real Hermes Agent: the oldest supported release, two
+  # later ones and the current main branch, in both plugin isolation modes.
+  hermes:
+    name: hermes (${{ matrix.hermes }})
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        hermes: ["v0.21.6", "v0.22.7", "v0.23.0", "main"]
+    env:
+      HERMES_PENFIELD_REQUIRE_HERMES: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: plugin
+          persist-credentials: false
+
+      - uses: actions/checkout@v7
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.hermes }}
+          path: hermes-agent
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.14"
+          activate-environment: true
+          enable-cache: true
+
+      # Run from inside the checkout so Hermes's own dependency overrides apply.
+      - name: Install Hermes Agent
+        working-directory: hermes-agent
+        run: uv pip install -e .
+
+      - name: Install test tools
+        run: uv pip install -r plugin/requirements-dev.txt
+
+      - name: Hermes version
+        run: hermes --version
+
+      - name: Integration tests
+        working-directory: plugin
+        run: make test-hermes
+
+  # Live round trip against the Penfield dev API. Runs only where the
+  # repository has opted in and holds a dev API key.
+  live:
+    needs: lint
     if: ${{ vars.RUN_INTEGRATION == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       PENFIELD_ENV: dev
       PENFIELD_API_KEY: ${{ secrets.PENFIELD_DEV_API_KEY }}
-
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
         with:
-          python-version: "3.13"
-          cache: pip
-      - run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-      - name: Integration tests (dev)
-        run: pytest -m integration --no-cov -v
+          persist-credentials: false
 
-  # -----------------------------------------------------------------------
-  # Version-tag guard — a tag must match pyproject.toml's version.
-  # -----------------------------------------------------------------------
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Live API tests
+        run: pytest -m integration --no-cov
+
   version-tag-guard:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
         with:
-          python-version: "3.13"
-      - name: Assert tag matches pyproject.toml version
+          persist-credentials: false
+
+      - name: Tag matches the declared version
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          VERSION=$(python3 -c "
-          import tomllib, pathlib
-          d = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
-          print(d['project']['version'])
-          ")
-          EXPECTED="v${VERSION}"
-          if [ "$TAG" != "$EXPECTED" ]; then
-            echo "::error::Tag '$TAG' does not match pyproject.toml version '$VERSION' (expected '$EXPECTED')"
+          VERSION="$(sed -n 's/^version: *//p' plugin.yaml)"
+          if [ "$TAG" != "v${VERSION}" ]; then
+            echo "::error::Tag '$TAG' does not match plugin.yaml version '$VERSION' (expected 'v${VERSION}')"
             exit 1
           fi
-          echo "Tag '$TAG' matches pyproject.toml version '$VERSION'."
+          echo "Tag '$TAG' matches plugin.yaml version '$VERSION'."

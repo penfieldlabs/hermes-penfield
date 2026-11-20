@@ -4,32 +4,93 @@
 
 Resolution order for the API base URL (highest priority first):
 
-1. Explicit ``PENFIELD_URL`` env var (full base URL, e.g. for staging).
-2. ``PENFIELD_ENV`` env var (``dev`` | ``prod``) -> host table.
+1. Explicit ``PENFIELD_URL`` setting (full base URL, e.g. for staging).
+2. ``PENFIELD_ENV`` setting (``dev`` | ``prod``) -> host table.
 3. ``penfield_url`` saved config value.
 4. Default: production.
 
 The same switch also selects the auth/portal/mcp host pairs so OAuth and
 CLI commands talk to the right environment. See ADR-0003.
+
+``PENFIELD_*`` settings are read through :func:`read_setting`, which asks
+Hermes for the value that belongs to the active profile. One Hermes gateway
+can serve several profiles from a single process, each with its own
+``.env``; reading ``os.environ`` there could hand one profile another's key.
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from .constants import API_PREFIX, DEV_HOSTS, PROD_HOSTS
 from .exceptions import ConfigError
 
+logger = logging.getLogger("penfield.config")
+
 DEFAULT_ENV = "prod"
 
+#: Behaviour settings a user may put in ``penfield/config.json``, with the
+#: type each must have and, for numbers, the range it is kept within.
+_KNOBS: dict[str, tuple[type, float | None, float | None]] = {
+    "auto_recall": (bool, None, None),
+    "recall_limit": (int, 1, 100),
+    "recall_threshold": (float, 0.0, 1.0),
+    "max_prefetch_chars": (int, 200, 100_000),
+    "pre_compress_save": (bool, None, None),
+    "mirror_builtin_writes": (bool, None, None),
+}
+#: Connection settings stored next to them.
+_CONNECTION_KEYS = frozenset({"penfield_env", "penfield_url", "api_key", "auth_method"})
 
-class Environment(str, Enum):
-    """Deployment environment. ``str`` mixin so values serialize as JSON."""
+
+def _coerce(value: object, kind: type, low: float | None, high: float | None) -> object:
+    """Return ``value`` as ``kind`` within ``[low, high]``, or ``None`` if it is not one."""
+    if kind is bool:
+        return value if isinstance(value, bool) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if kind is int and int(value) != value:
+        return None
+    number = kind(value)
+    if low is not None:
+        number = max(kind(low), number)
+    if high is not None:
+        number = min(kind(high), number)
+    return number
+
+
+def read_setting(name: str) -> str:
+    """Return the ``PENFIELD_*`` setting ``name`` for the active Hermes profile.
+
+    Inside Hermes this resolves through ``agent.secret_scope.get_secret``:
+    the profile's own ``.env`` first, then the process environment where
+    Hermes allows it. Outside Hermes (unit tests, scripts) it is a plain
+    environment read. An unset setting is an empty string.
+    """
+    try:
+        from agent.secret_scope import get_secret  # type: ignore[import-not-found]
+    except ImportError:
+        return os.environ.get(name) or ""
+    return str(get_secret(name) or "")
+
+
+def default_hermes_home() -> str:
+    """Return the active Hermes profile home, as Hermes itself resolves it."""
+    try:
+        from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
+    except ImportError:
+        return os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+    return str(get_hermes_home())
+
+
+class Environment(StrEnum):
+    """Deployment environment. A string enum, so values serialize as JSON."""
 
     PROD = "prod"
     DEV = "dev"
@@ -49,7 +110,7 @@ def resolve_environment(env_str: str | None = None) -> Environment:
     Raises:
         ConfigError: If the value is not a recognized environment.
     """
-    raw = (env_str if env_str is not None else os.environ.get("PENFIELD_ENV")) or DEFAULT_ENV
+    raw = (env_str if env_str is not None else read_setting("PENFIELD_ENV")) or DEFAULT_ENV
     try:
         return Environment(raw.lower())
     except ValueError as exc:
@@ -98,14 +159,15 @@ class PenfieldConfig:
     portal_url: str = ""
     mcp_url: str = ""
     api_key: str | None = None
-    # Advanced knobs (see spec section 8.2). Defaults are conservative.
+    # Behaviour settings; the README describes each one.
     auto_recall: bool = True
     recall_limit: int = 5
-    recall_threshold: float = 0.7
+    # Lowest search score auto-recall accepts; the API's own relevance floor.
+    recall_threshold: float = 0.25
+    max_prefetch_chars: int = 3000
+    pre_compress_save: bool = False
     mirror_builtin_writes: bool = False
-    sync_turn_enabled: bool = True
-    pre_compress_save: bool = True
-    max_prefetch_chars: int = 2000
+    #: Saved keys this version does not know; kept so a save does not drop them.
     extra: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -150,15 +212,13 @@ class PenfieldConfig:
 
         # Environment
         env_val = (
-            env or os.environ.get("PENFIELD_ENV") or str(saved.get("penfield_env", DEFAULT_ENV))
+            env or read_setting("PENFIELD_ENV") or str(saved.get("penfield_env", DEFAULT_ENV))
         )
         environment = resolve_environment(env_val)
 
         # URL override: explicit arg > env var > saved penfield_url > derived
         override = (
-            api_url_override
-            or os.environ.get("PENFIELD_URL")
-            or str(saved.get("penfield_url", ""))
+            api_url_override or read_setting("PENFIELD_URL") or str(saved.get("penfield_url", ""))
         )
 
         instance = cls(env=environment)
@@ -170,42 +230,26 @@ class PenfieldConfig:
         # API key
         key = (
             api_key
-            or os.environ.get("PENFIELD_API_KEY")
+            or read_setting("PENFIELD_API_KEY")
             or (saved.get("api_key") if isinstance(saved.get("api_key"), str) else None)
         )
         instance.api_key = key if isinstance(key, str) else None
 
-        # Advanced knobs from saved config
-        for fld in (
-            "auto_recall",
-            "recall_limit",
-            "recall_threshold",
-            "mirror_builtin_writes",
-            "sync_turn_enabled",
-            "pre_compress_save",
-            "max_prefetch_chars",
-        ):
-            if fld in saved and hasattr(instance, fld):
-                setattr(instance, fld, saved[fld])
-        # Anything else survives in extra for forward-compat.
-        known = {
-            "penfield_env",
-            "penfield_url",
-            "api_key",
-            "auth_method",
-            *{
-                f
-                for f in (
-                    "auto_recall",
-                    "recall_limit",
-                    "recall_threshold",
-                    "mirror_builtin_writes",
-                    "sync_turn_enabled",
-                    "pre_compress_save",
-                    "max_prefetch_chars",
+        # Behaviour settings from the saved config
+        for name, (kind, low, high) in _KNOBS.items():
+            if name not in saved:
+                continue
+            value = _coerce(saved[name], kind, low, high)
+            if value is None:
+                logger.warning(
+                    "ignoring %s=%r in penfield/config.json: expected %s",
+                    name,
+                    saved[name],
+                    "true or false" if kind is bool else "a number",
                 )
-            },
-        }
+            else:
+                setattr(instance, name, value)
+        known = _CONNECTION_KEYS | _KNOBS.keys()
         instance.extra = {k: v for k, v in saved.items() if k not in known}
         return instance
 
@@ -228,23 +272,16 @@ class PenfieldConfig:
     def save(self, hermes_home: str | Path) -> Path:
         """Persist non-secret config to ``{hermes_home}/penfield/config.json``.
 
-        The API key is *never* written by this method; secrets stay in env
-        vars or the keychain. See ADR-0005 and SECURITY.md.
+        The API key is never written by this method: Hermes keeps it in the
+        profile's ``.env``. See SECURITY.md.
         """
         pd = _penfield_dir(hermes_home)
         cfg_path = pd / "config.json"
-        data: dict[str, object] = {
-            "penfield_env": self.env.value,
-            "auto_recall": self.auto_recall,
-            "recall_limit": self.recall_limit,
-            "recall_threshold": self.recall_threshold,
-            "mirror_builtin_writes": self.mirror_builtin_writes,
-            "sync_turn_enabled": self.sync_turn_enabled,
-            "pre_compress_save": self.pre_compress_save,
-            "max_prefetch_chars": self.max_prefetch_chars,
-        }
+        data: dict[str, object] = dict(self.extra)
+        data["penfield_env"] = self.env.value
+        data.update({name: getattr(self, name) for name in _KNOBS})
         # Persist the URL override only when it differs from what the
-        # current env would derive — otherwise we'd either drop a real
+        # current env would derive. Otherwise we'd either drop a real
         # custom override on restart (the heuristic bug) or redundantly
         # persist the default. Compare against the derived default, not a
         # string-prefix guess.

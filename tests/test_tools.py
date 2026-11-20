@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026 Penfield
-"""Unit tests for tool dispatch and schema invariants — mirrors MCP surface."""
+"""Each tool turns its arguments into the right API request."""
 
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from penfield.tools import (
-    PENFIELD_TOOL_SCHEMAS,
-    TOOL_NAMES,
-    dispatch,
-)
+from penfield.client import PenfieldClient
+from penfield.tools import dispatch
+
+from tests.support.fake_penfield import FakePenfield
 
 
 class _RecordingClient:
@@ -37,39 +37,6 @@ class _RecordingClient:
         return {"id": "new", "ok": True}
 
 
-class TestSchemas:
-    def test_seventeen_tools(self) -> None:
-        assert len(PENFIELD_TOOL_SCHEMAS) == 17
-
-    def test_each_has_required_fields(self) -> None:
-        for t in PENFIELD_TOOL_SCHEMAS:
-            assert "name" in t
-            assert "description" in t
-            assert "parameters" in t
-
-    def test_names_match_mcp(self) -> None:
-        expected = {
-            "penfield_awaken",
-            "penfield_store",
-            "penfield_recall",
-            "penfield_search",
-            "penfield_fetch",
-            "penfield_update_memory",
-            "penfield_connect",
-            "penfield_disconnect",
-            "penfield_explore",
-            "penfield_reflect",
-            "penfield_save_artifact",
-            "penfield_retrieve_artifact",
-            "penfield_list_artifacts",
-            "penfield_delete_artifact",
-            "penfield_list_contexts",
-            "penfield_restore_context",
-            "penfield_save_context",
-        }
-        assert expected == TOOL_NAMES
-
-
 class TestStore:
     def test_minimal_body(self) -> None:
         c = _RecordingClient()
@@ -77,11 +44,6 @@ class TestStore:
         name, body, _ = c.calls[0]
         assert name == "memory_create"
         assert body == {"content": "hello"}
-
-    def test_rejects_secret_like_content(self) -> None:
-        c = _RecordingClient()
-        with pytest.raises(ValueError, match="secret"):
-            dispatch(c, "penfield_store", {"content": "my token is ghp_abc123"})
 
 
 class TestRecall:
@@ -204,7 +166,6 @@ class TestListContexts:
         name, _, query = c.calls[0]
         assert name == "memory_list"
         assert query["memory_type"] == "checkpoint"
-        assert query["per_page"] == 10
 
     def test_list_contexts_with_name_pattern(self) -> None:
         c = _RecordingClient()
@@ -216,9 +177,8 @@ class TestListContexts:
 
     def test_list_contexts_default_limit(self) -> None:
         c = _RecordingClient()
-        dispatch(c, "penfield_list_contexts", {})
-        _, _, query = c.calls[0]
-        assert query["per_page"] == 20
+        result = json.loads(dispatch(c, "penfield_list_contexts", {}))
+        assert result["limit"] == 20
 
 
 class TestRestoreContext:
@@ -279,7 +239,8 @@ class TestRecallTagsTranslation:
         c = _RecordingClient()
         dispatch(c, "penfield_recall", {"query": "q", "source_type": "memory"})
         _, body, _ = c.calls[0]
-        assert body["source_types"] == ["memory"]
+        assert "direct_input" in body["source_types"]
+        assert "document_upload" not in body["source_types"]
         assert "source_type" not in body
 
     def test_plain_query_limit_still_works(self) -> None:
@@ -289,87 +250,95 @@ class TestRecallTagsTranslation:
         assert body == {"query": "q", "limit": 5}
 
 
-class TestSaveContext:
-    """save_context: creates checkpoint with structured content + reference parsing."""
+class TestReflectWindows:
+    @pytest.mark.parametrize("window", ["recent", "today", "week", "month"])
+    def test_named_windows_are_sent_as_they_are(
+        self, window: str, api: FakePenfield, api_client: PenfieldClient
+    ) -> None:
+        result = json.loads(dispatch(api_client, "penfield_reflect", {"time_window": window}))
 
-    def test_creates_checkpoint_with_name_and_tags(self) -> None:
-        c = _RecordingClient()
+        assert result["time_window"] == window
+        (request,) = api.calls("POST", "/analysis/reflect")
+        assert request.body == {"time_window": window}
+
+    @pytest.mark.parametrize(("window", "days"), [("1d", 1), ("7d", 7), ("30d", 30), ("90d", 90)])
+    def test_day_windows_are_sent_as_a_start_date(
+        self, window: str, days: int, api: FakePenfield, api_client: PenfieldClient
+    ) -> None:
+        before = datetime.now(UTC) - timedelta(days=days, seconds=5)
+
+        dispatch(api_client, "penfield_reflect", {"time_window": window})
+
+        (request,) = api.calls("POST", "/analysis/reflect")
+        assert set(request.body) == {"start_date"}
+        sent = datetime.strptime(request.body["start_date"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=UTC
+        )
+        assert before <= sent <= datetime.now(UTC) - timedelta(days=days) + timedelta(seconds=5)
+
+    def test_a_day_window_only_returns_memories_from_those_days(
+        self, api: FakePenfield, api_client: PenfieldClient
+    ) -> None:
+        now = datetime.now(UTC)
+        recent = api.seed_memory("new", created_at=(now - timedelta(days=2)).isoformat())
+        api.seed_memory("old", created_at=(now - timedelta(days=20)).isoformat())
+
+        result = json.loads(dispatch(api_client, "penfield_reflect", {"time_window": "7d"}))
+
+        assert [m["id"] for m in result["memories"]] == [recent]
+
+    def test_explicit_dates_win_over_a_day_window(
+        self, api: FakePenfield, api_client: PenfieldClient
+    ) -> None:
+        dispatch(api_client, "penfield_reflect", {"time_window": "7d", "start_date": "2026-01-01"})
+
+        (request,) = api.calls("POST", "/analysis/reflect")
+        assert request.body == {"start_date": "2026-01-01"}
+
+    def test_an_unknown_window_is_refused_before_any_request(
+        self, api: FakePenfield, api_client: PenfieldClient
+    ) -> None:
+        with pytest.raises(ValueError, match="time_window must be one of"):
+            dispatch(api_client, "penfield_reflect", {"time_window": "fortnight"})
+        assert api.calls("POST", "/analysis/reflect") == []
+
+
+class TestListArtifacts:
+    @pytest.fixture
+    def files(self, api: FakePenfield) -> None:
+        api.artifacts.update(
+            {
+                "/readme.md": "root",
+                "/project/notes.md": "notes",
+                "/project/Meeting-2026.md": "minutes",
+                "/project/meetings/q3.md": "nested",
+            }
+        )
+
+    def test_lists_the_root_by_default(self, files: None, api_client: PenfieldClient) -> None:
+        result = json.loads(dispatch(api_client, "penfield_list_artifacts", {}))
+
+        assert result["folders"] == ["project"]
+        assert [f["name"] for f in result["files"]] == ["readme.md"]
+
+    def test_lists_one_directory(self, files: None, api_client: PenfieldClient) -> None:
+        result = json.loads(
+            dispatch(api_client, "penfield_list_artifacts", {"path_prefix": "/project/"})
+        )
+
+        assert result["folders"] == ["meetings"]
+        assert [f["name"] for f in result["files"]] == ["Meeting-2026.md", "notes.md"]
+
+    def test_filters_files_and_folders_by_name(
+        self, files: None, api_client: PenfieldClient
+    ) -> None:
         result = json.loads(
             dispatch(
-                c,
-                "penfield_save_context",
-                {
-                    "name": "Test Session",
-                    "description": "Testing save_context",
-                },
+                api_client,
+                "penfield_list_artifacts",
+                {"path_prefix": "/project/", "name_pattern": "meeting"},
             )
         )
-        name, body, _ = c.calls[-1]  # last call is the create
-        assert name == "memory_create"
-        assert body["memory_type"] == "checkpoint"
-        assert body["importance"] == 0.9
-        assert "Test Session" in body["tags"]
-        assert result["success"] is True
-        assert result["references_extracted"] == 0
 
-    def test_parses_memory_id_references(self) -> None:
-        c = _RecordingClient()
-        result = json.loads(
-            dispatch(
-                c,
-                "penfield_save_context",
-                {
-                    "name": "Ref Test",
-                    "description": (
-                        "See memory_id: 550e8400-e29b-41d4-a716-446655440000 for details"
-                    ),
-                },
-            )
-        )
-        assert result["references_extracted"] == 1
-        assert result["references_resolved"] == 1
-
-    def test_parses_memory_phrase_references(self) -> None:
-        c = _RecordingClient()
-        result = json.loads(
-            dispatch(
-                c,
-                "penfield_save_context",
-                {
-                    "name": "Phrase Test",
-                    "description": "Related to memory: 'OAuth device flow'",
-                },
-            )
-        )
-        assert result["references_extracted"] == 1
-
-    def test_rejects_duplicate_name(self) -> None:
-        c = _RecordingClient()
-        # Override the memory_list to return an existing checkpoint with same name
-        original_call = c.call
-
-        def mock_call(endpoint, **kw):
-            if (
-                endpoint == "memory_list"
-                and kw.get("query", {}).get("memory_type") == "checkpoint"
-            ):
-                return {
-                    "items": [
-                        {"id": "existing", "content": json.dumps({"checkpoint_name": "Dup Name"})}
-                    ]
-                }
-            return original_call(endpoint, **kw)
-
-        c.call = mock_call
-        result = json.loads(
-            dispatch(
-                c,
-                "penfield_save_context",
-                {
-                    "name": "Dup Name",
-                    "description": "should fail",
-                },
-            )
-        )
-        assert result["success"] is False
-        assert result["error_code"] == "DUPLICATE_NAME"
+        assert result["folders"] == ["meetings"]
+        assert [f["name"] for f in result["files"]] == ["Meeting-2026.md"]

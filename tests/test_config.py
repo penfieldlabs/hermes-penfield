@@ -81,3 +81,63 @@ class TestLoadSave:
     def test_token_path(self, tmp_path: pathlib.Path) -> None:
         cfg = PenfieldConfig(env=Environment.PROD)
         assert cfg.token_path(tmp_path) == tmp_path / "penfield" / "tokens.json"
+
+
+class TestSettings:
+    def test_unset_is_an_empty_string(self) -> None:
+        from penfield.config import read_setting
+
+        assert read_setting("PENFIELD_API_KEY") == ""
+
+    def test_reads_the_environment_outside_hermes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from penfield.config import read_setting
+
+        monkeypatch.setenv("PENFIELD_ENV", "dev")
+        assert read_setting("PENFIELD_ENV") == "dev"
+
+    def test_default_home_follows_hermes_home(self, tmp_path: pathlib.Path) -> None:
+        from penfield.config import default_hermes_home
+
+        assert default_hermes_home() == str(tmp_path / "hermes-home")
+
+
+class TestBehaviourSettings:
+    def _load(self, home: pathlib.Path, **saved: object) -> PenfieldConfig:
+        (home / "penfield").mkdir(parents=True, exist_ok=True)
+        (home / "penfield" / "config.json").write_text(json.dumps(saved), encoding="utf-8")
+        return PenfieldConfig.load(home)
+
+    def test_saved_values_are_applied(self, tmp_path: pathlib.Path) -> None:
+        cfg = self._load(
+            tmp_path,
+            auto_recall=False,
+            recall_limit=8,
+            recall_threshold=0.4,
+            max_prefetch_chars=900,
+        )
+        assert (cfg.auto_recall, cfg.recall_limit) == (False, 8)
+        assert (cfg.recall_threshold, cfg.max_prefetch_chars) == (0.4, 900)
+
+    def test_numbers_are_kept_within_range(self, tmp_path: pathlib.Path) -> None:
+        cfg = self._load(tmp_path, recall_limit=5000, recall_threshold=7, max_prefetch_chars=1)
+        assert (cfg.recall_limit, cfg.recall_threshold, cfg.max_prefetch_chars) == (100, 1.0, 200)
+
+    def test_a_value_of_the_wrong_type_is_ignored_with_a_warning(
+        self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        cfg = self._load(tmp_path, auto_recall="false", recall_limit="many")
+
+        assert (cfg.auto_recall, cfg.recall_limit) == (True, 5)
+        assert "ignoring auto_recall='false'" in caplog.text
+        assert "ignoring recall_limit='many'" in caplog.text
+
+    def test_unknown_keys_survive_a_save(self, tmp_path: pathlib.Path) -> None:
+        cfg = self._load(tmp_path, added_by_a_newer_version=True)
+        cfg.save(tmp_path)
+        saved = json.loads((tmp_path / "penfield" / "config.json").read_text())
+        assert saved["added_by_a_newer_version"] is True
+
+    def test_a_broken_file_falls_back_to_defaults(self, tmp_path: pathlib.Path) -> None:
+        (tmp_path / "penfield").mkdir()
+        (tmp_path / "penfield" / "config.json").write_text("{not json", encoding="utf-8")
+        assert PenfieldConfig.load(tmp_path).recall_limit == 5

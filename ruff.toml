@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 Penfield
+#
+# Tool configuration lives in one file per tool. There is no pyproject.toml
+# on purpose: Hermes takes one in a plugin's directory as a declaration of
+# Python dependencies, and this plugin has none (ADR-0019).
+
+target-version = "py311"
+line-length = 99
+include = ["*.py", "tests/**/*.py"]
+
+[lint]
+select = [
+    "E", "W", "F", "I", "N", "UP", "B", "SIM", "TCH", "RUF", "D", "ANN",
+]
+ignore = ["D203", "D213", "ANN401"]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["D", "ANN", "TC001", "TC002", "TC003"]
+"docs/**/*.py" = ["D", "ANN"]
+"__init__.py" = ["N999"]
+"cli.py" = ["D103"]  # repo dir has hyphen; loaded by Hermes, not pip
+
+[lint.pydocstyle]
+convention = "google"

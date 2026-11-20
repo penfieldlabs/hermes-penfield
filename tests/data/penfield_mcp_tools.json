@@ -1,0 +1,527 @@
+{
+  "_about": [
+    "The tool list of the Penfield MCP server (https://mcp.penfield.app), as the server",
+    "reports it in a tools/list response, with descriptions left out.",
+    "tests/test_surface.py compares the plugin's tools against this file, so a change in",
+    "Penfield's surface shows up as a failing test once the snapshot is refreshed.",
+    "See CONTRIBUTING.md for how to refresh it."
+  ],
+  "captured": "2026-11-19",
+  "tools": [
+    {
+      "name": "awaken",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "store",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "importance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "content"
+        ]
+      }
+    },
+    {
+      "name": "recall",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "end_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "include_inactive": {
+            "default": false,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 10,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "source_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "start_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "search",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_inactive": {
+            "default": false,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 10,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "fetch",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "update_memory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "importance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "memory_id": {
+            "type": "string"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "memory_id"
+        ]
+      }
+    },
+    {
+      "name": "connect",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "from_memory": {
+            "type": "string"
+          },
+          "relationship_type": {
+            "type": "string"
+          },
+          "strength": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "to_memory": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_memory",
+          "to_memory",
+          "relationship_type"
+        ]
+      }
+    },
+    {
+      "name": "disconnect",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "from_memory": {
+            "type": "string"
+          },
+          "to_memory": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_memory",
+          "to_memory"
+        ]
+      }
+    },
+    {
+      "name": "explore",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "max_depth": {
+            "default": 3,
+            "type": "integer"
+          },
+          "relationship_types": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "start_memory": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_memory"
+        ]
+      }
+    },
+    {
+      "name": "reflect",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "end_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "include_documents": {
+            "default": false,
+            "type": "boolean"
+          },
+          "start_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "time_window": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": "recent"
+          }
+        }
+      }
+    },
+    {
+      "name": "save_context",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    {
+      "name": "restore_context",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "default": 20,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    {
+      "name": "list_contexts",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_descriptions": {
+            "default": false,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer"
+          },
+          "name_pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "save_artifact",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content",
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "retrieve_artifact",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "list_artifacts",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name_pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "path_prefix": {
+            "default": "/",
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "delete_artifact",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    }
+  ],
+  "documented_values": {
+    "_about": "Values the tool descriptions list in prose; the schemas do not enumerate them.",
+    "recall.source_type": [
+      "memory",
+      "document"
+    ],
+    "reflect.time_window": [
+      "recent",
+      "today",
+      "week",
+      "month",
+      "1d",
+      "7d",
+      "30d",
+      "90d"
+    ],
+    "connect.relationship_type": [
+      "supersedes",
+      "updates",
+      "evolution_of",
+      "supports",
+      "contradicts",
+      "disputes",
+      "parent_of",
+      "child_of",
+      "sibling_of",
+      "causes",
+      "influenced_by",
+      "prerequisite_for",
+      "implements",
+      "documents",
+      "example_of",
+      "tests",
+      "responds_to",
+      "references",
+      "inspired_by",
+      "follows",
+      "precedes",
+      "depends_on",
+      "composed_of",
+      "part_of"
+    ]
+  }
+}

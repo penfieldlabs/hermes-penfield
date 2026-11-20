@@ -1,7 +1,7 @@
 # ADR-0008: Builtin MEMORY.md/USER.md writes are not mirrored by default
 
 - **Date:** 2026-06-29
-- **Status:** Accepted
+- **Status:** Accepted. [ADR-0018](0018-builtin-memory-mirror.md) describes the mirror when it is on.
 
 ## Context
 

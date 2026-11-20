@@ -14,6 +14,9 @@ import json
 import sys
 from typing import Any
 
+#: Characters of each memory that ``hermes penfield search`` prints.
+_CLI_RESULT_CHARS = 200
+
 
 def register_cli(parser: argparse.ArgumentParser) -> None:
     """Register ``hermes penfield <subcommand>`` handlers.
@@ -70,26 +73,12 @@ def penfield_command(args: argparse.Namespace) -> None:
 # Command implementations
 # ---------------------------------------------------------------------------
 
-__version__ = "0.2.0"
-
 
 def _resolve_hermes_home(hermes_home: str = "") -> str:
-    """Resolve HERMES_HOME the way Hermes itself does.
+    """Return the Hermes home to use: ``--hermes-home`` or the active profile."""
+    from .config import default_hermes_home
 
-    Priority: explicit arg > $HERMES_HOME > ~/.hermes.
-    Without this, commands like `hermes penfield status` fail to find
-    tokens at ~/.hermes/penfield/tokens.json because the default empty
-    string doesn't resolve to a real path.
-    """
-    import os
-    from pathlib import Path
-
-    if hermes_home:
-        return hermes_home
-    env_home = os.environ.get("HERMES_HOME", "")
-    if env_home:
-        return env_home
-    return str(Path.home() / ".hermes")
+    return hermes_home or default_hermes_home()
 
 
 def _build_config_and_client(hermes_home: str) -> tuple[Any, Any]:
@@ -105,32 +94,51 @@ def _build_config_and_client(hermes_home: str) -> tuple[Any, Any]:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    cfg, client = _build_config_and_client(getattr(args, "hermes_home", ""))
-    print(f"penfield {__version__}")
+    from .constants import VERSION
+    from .exceptions import AuthError, AuthTransportError, PenfieldError
+
+    hermes_home = _resolve_hermes_home(getattr(args, "hermes_home", ""))
+    cfg, client = _build_config_and_client(hermes_home)
+    if cfg.api_key:
+        credentials = "API key"
+    elif client.is_authenticated():
+        credentials = "saved login"
+    else:
+        credentials = "none"
+    print(f"penfield {VERSION}")
     print(f"environment: {cfg.env.value}")
     print(f"api_base: {cfg.api_base}")
-    print(f"api_key set: {'yes' if cfg.api_key else 'no'}")
-    print(f"authenticated: {'yes' if client.is_authenticated() else 'no'}")
+    print(f"credentials: {credentials}")
+    # Only a real request shows whether the credentials still work.
     try:
         stats = client.call("search_stats")
+    except AuthTransportError as exc:
+        print(f"connection: failed ({exc})")
+    except AuthError as exc:
+        print(f"connection: not signed in ({exc})")
+    except PenfieldError as exc:
+        print(f"connection: failed ({exc})")
+    else:
+        print("connection: ok")
         print(f"memory count: {stats.get('total_memories', '?')}")
-    except Exception as exc:
-        print(f"memory count: unavailable ({exc})")
     return 0
 
 
 def cmd_login(args: argparse.Namespace) -> int:
-    import os
-    from pathlib import Path
-
     from .auth import PenfieldAuth
     from .config import PenfieldConfig
     from .exceptions import AuthError
 
-    hermes_home = getattr(args, "hermes_home", "") or os.environ.get("HERMES_HOME", "")
-    if not hermes_home:
-        hermes_home = str(Path.home() / ".hermes")
+    hermes_home = _resolve_hermes_home(getattr(args, "hermes_home", ""))
     cfg = PenfieldConfig.load(hermes_home)
+    if cfg.api_key:
+        print(
+            "login not started: this profile has an API key (PENFIELD_API_KEY), which is "
+            "used in preference to a browser sign-in. Remove it from the profile's .env "
+            "to sign in with a browser.",
+            file=sys.stderr,
+        )
+        return 1
     auth = PenfieldAuth(cfg, hermes_home)
     try:
         auth.device_code_flow(client_id=getattr(args, "client_id", None))
@@ -148,8 +156,19 @@ def cmd_logout(args: argparse.Namespace) -> int:
     hermes_home = _resolve_hermes_home(getattr(args, "hermes_home", ""))
     cfg = PenfieldConfig.load(hermes_home)
     auth = PenfieldAuth(cfg, hermes_home)
-    auth.logout()
-    print("logged out; cached tokens cleared.")
+    signed_in = auth.has_saved_tokens()
+    revoked = auth.logout()
+    if not signed_in:
+        print("not logged in; nothing to clear.")
+    elif revoked:
+        print("logged out; the sign-in was revoked and cached tokens cleared.")
+    else:
+        print("logged out; cached tokens cleared.")
+    if cfg.api_key:
+        print(
+            "the API key in this profile is still in use; remove PENFIELD_API_KEY from "
+            "its .env to disconnect."
+        )
     return 0
 
 
@@ -171,8 +190,10 @@ def cmd_search(args: argparse.Namespace) -> int:
     for it in parsed.get("items", []):
         score = it.get("score")
         score_str = f"{score:.3f}" if isinstance(score, (int, float)) else "  -  "
-        snippet = it.get("snippet", "")
-        print(f"[{score_str}] {snippet}")
+        text = " ".join(str(it.get("content") or "").split())
+        if len(text) > _CLI_RESULT_CHARS:
+            text = text[:_CLI_RESULT_CHARS].rstrip() + "..."
+        print(f"[{score_str}] {it.get('id')}  {text}")
     return 0
 
 
@@ -190,5 +211,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
 
 def cmd_version(_args: argparse.Namespace) -> int:
-    print(__version__)
+    from .constants import VERSION
+
+    print(VERSION)
     return 0

@@ -1,7 +1,7 @@
 # ADR-0012: on_pre_compress uses save_context for checkpoints
 
 - **Date:** 2026-07-01
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0016](0016-pre-compress-checkpoints.md)
 
 ## Context
 

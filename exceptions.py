@@ -20,9 +20,20 @@ class ConfigError(PenfieldError):
 class AuthError(PenfieldError):
     """Raised on authentication / token failures."""
 
+    #: HTTP status of the answer that caused it, when there was one.
+    status: int | None = None
+
 
 class TokenExpiredError(AuthError):
     """Refresh token has expired or been revoked; re-auth required."""
+
+
+class AuthTransportError(AuthError):
+    """The auth server could not be reached or failed to answer.
+
+    Says nothing about whether the credentials are still good, so callers
+    keep their tokens and try again later.
+    """
 
 
 class RateLimitError(PenfieldError):
@@ -58,6 +69,10 @@ class APIError(PenfieldError):
 
 class NotFoundError(APIError):
     """404 from the API (memory / relationship / artifact missing)."""
+
+
+class PermissionDeniedError(APIError):
+    """403 from the API: the credentials are valid but may not do this."""
 
 
 class ValidationError(APIError):

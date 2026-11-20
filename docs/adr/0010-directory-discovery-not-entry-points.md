@@ -1,7 +1,7 @@
 # ADR-0010: Memory providers are directory-installed, not pip entry points
 
 - **Date:** 2026-06-29
-- **Status:** Accepted
+- **Status:** Accepted. Extended by [ADR-0019](0019-no-package-metadata.md).
 
 ## Context
 

@@ -1,7 +1,7 @@
 # ADR-0007: Secret-shaped content is rejected from store paths
 
 - **Date:** 2026-06-29
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0014](0014-no-content-filter.md)
 
 ## Context
 

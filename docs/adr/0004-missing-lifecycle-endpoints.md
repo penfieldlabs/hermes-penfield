@@ -1,7 +1,7 @@
 # ADR-0004: Missing lifecycle endpoints — defensive no-ops + synthesized checkpoints
 
 - **Date:** 2026-06-29
-- **Status:** Accepted
+- **Status:** Accepted. The checkpoint design is amended by [ADR-0016](0016-pre-compress-checkpoints.md).
 
 ## Context
 

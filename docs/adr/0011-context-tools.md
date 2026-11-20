@@ -1,7 +1,7 @@
 # ADR-0011: Context tools — full implementation, no MCP shim
 
 - **Date:** 2026-07-01
-- **Status:** Accepted
+- **Status:** Accepted. The current rules are in [docs/checkpoints.md](../checkpoints.md).
 
 ## Context
 
