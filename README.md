@@ -15,8 +15,7 @@ search and connect what it learns.
 ## Requirements
 
 - Hermes Agent 0.21.6 or newer.
-- A Penfield account and an API key from
-  [portal.penfield.app](https://portal.penfield.app/settings/api-keys).
+- A Penfield account.
 
 The plugin has no dependencies of its own. It uses the Python standard
 library only.
@@ -38,19 +37,17 @@ hermes plugins update penfield
 
 ## Connect
 
+Sign in with your browser. This is the recommended way to connect:
+
 ```bash
-hermes memory setup penfield
+hermes penfield login
 ```
 
-Paste your API key; it is not shown as you type. The plugin checks the
-key with Penfield, Hermes stores it in the profile's `.env` as
-`PENFIELD_API_KEY`, and Penfield becomes the profile's memory provider. A
-key Penfield does not accept is not saved. You can also add that line to
-`.env` yourself.
-
-`hermes memory setup` without a name lists the providers to choose from.
-Use that form if the profile sets `plugins.isolation: host`: there the
-named command selects Penfield without asking for the key.
+The command shows a link and a code. Open the link in a browser on any
+device, approve it within ten minutes, and the plugin is signed in. The
+tokens are kept in `penfield/tokens.json` in your profile, readable only
+by you, and renewed automatically. `hermes penfield logout` revokes the
+sign-in at Penfield and deletes the file.
 
 Check the result at any time:
 
@@ -60,24 +57,39 @@ hermes memory status
 
 Start a new session and Penfield is active.
 
-### Signing in with a browser instead
+### Using an API key instead
 
-`hermes penfield login` shows a link and a code. Approve it in a browser
-within ten minutes and the plugin is signed in; no API key is needed. The
-tokens are kept in `penfield/tokens.json` in your profile, readable only
-by you, and renewed automatically. `hermes penfield logout` revokes the
-sign-in at Penfield and deletes the file.
+An API key is the backup for setups where browser sign-in does not fit,
+and the way to limit what the agent may do: a key can be read-only, read
+and write, or read, write and delete. Create one at
+[portal.penfield.app](https://portal.penfield.app/settings/api-keys),
+then run:
 
-A profile uses one login at a time, and an API key takes precedence.
-While `PENFIELD_API_KEY` is set the plugin uses it and
-`hermes penfield login` does not start. `hermes memory setup penfield`
-ends a saved sign-in when it stores a key. To go back to a browser
-sign-in, remove the key from `.env` and run `hermes penfield login`.
+```bash
+hermes memory setup penfield
+```
+
+Paste the key; it is not shown as you type. The plugin checks the key
+with Penfield, Hermes stores it in the profile's `.env` as
+`PENFIELD_API_KEY`, and Penfield becomes the profile's memory provider. A
+key Penfield does not accept is not saved. You can also add that line to
+`.env` yourself.
+
+`hermes memory setup` without a name lists the providers to choose from.
+Use that form if the profile sets `plugins.isolation: host`: there the
+named command selects Penfield without asking for the key.
+
+A profile uses one login at a time, and an API key takes precedence, so
+a key you set to limit access is always the one in use. While
+`PENFIELD_API_KEY` is set, `hermes penfield login` does not start, and
+`hermes memory setup penfield` ends a saved sign-in when it stores a
+key. To go back to a browser sign-in, remove the key from `.env` and run
+`hermes penfield login`.
 
 The `hermes penfield` commands exist only when Hermes runs plugins
 in-process, which is the default. A profile that is already signed in
-keeps working with `plugins.isolation: host`, but to sign in there, use
-an API key.
+keeps working with `plugins.isolation: host`, but to connect for the
+first time there, use an API key.
 
 ## What it does in a session
 
@@ -146,13 +158,13 @@ you use profiles):
 | `recall_threshold` | `0.25` | Lowest search score a recalled memory may have (0 to 1). Penfield scores each result relative to the best keyword match of the same search, so this trims the weak end of a result list. Lower `recall_limit` if you want less recalled. |
 | `max_prefetch_chars` | `3000` | Size limit of the recalled text added to a turn. |
 | `pre_compress_save` | `false` | Save a checkpoint before Hermes compresses the conversation. Each one is added to your saved contexts with the tag `auto-checkpoint`, so a long-running agent adds several a day. |
-| `mirror_builtin_writes` | `false` | Also copy what Hermes's built-in memory tool writes (`MEMORY.md`, `USER.md`) into Penfield, tagged `hermes-builtin`. Edits update the copy. Removals delete it if your API key has the delete permission. |
+| `mirror_builtin_writes` | `false` | Also copy what Hermes's built-in memory tool writes (`MEMORY.md`, `USER.md`) into Penfield, tagged `hermes-builtin`. Edits update the copy. Removals delete it if your login has the delete permission. |
 
 Environment settings, read from the profile's `.env`:
 
 | Variable | Meaning |
 | -------- | ------- |
-| `PENFIELD_API_KEY` | Your API key. |
+| `PENFIELD_API_KEY` | An API key, if you use one. |
 | `PENFIELD_URL` | Use a different API base URL. |
 | `PENFIELD_ENV` | `prod` (default) or `dev`. |
 
@@ -192,10 +204,12 @@ hermes penfield logout     # revoke the sign-in and forget cached tokens
 
 - `hermes memory status` shows whether the provider is available and
   which credentials and settings are in effect.
-- "Memory provider 'penfield' is selected but reports unavailable": no
-  API key was found. Run `hermes memory setup`. A gateway started by
-  systemd does not read your shell's environment, so the key has to be in
-  the profile's `.env`.
+- "Memory provider 'penfield' is selected but reports unavailable": the
+  profile has no sign-in and no API key. Run `hermes penfield login`, or
+  `hermes memory setup penfield` with an API key. A gateway started by
+  systemd does not read your shell's environment, so an API key has to
+  be in the profile's `.env`. A browser sign-in is kept in the profile
+  itself.
 - `hermes penfield status` makes a request with the credentials in use
   and says whether Penfield accepts them.
 - `hermes plugins doctor penfield` checks the installed plugin.

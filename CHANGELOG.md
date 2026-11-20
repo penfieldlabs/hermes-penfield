@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- README: browser sign-in (`hermes penfield login`) is the recommended way
+  to connect. An API key is the alternative, and the way to limit what
+  the agent may do.
+
 ## [0.3.0] - 2026-11-20
 
 Brings the plugin up to date with Hermes Agent 0.23 and with Penfield's
