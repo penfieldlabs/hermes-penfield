@@ -217,6 +217,7 @@ class TestPreCompress:
         (checkpoint,) = [m for m in api.memories.values() if m["memory_type"] == "checkpoint"]
         saved = json.loads(checkpoint["content"])
         assert saved["checkpoint_name"].startswith("pre-compress-unit-session-")
+        assert checkpoint["metadata"] == {"checkpoint_name": saved["checkpoint_name"]}
         assert saved["description"] == "Please plan the release checklist with me."
         assert "auto-checkpoint" in checkpoint["tags"]
         assert saved["checkpoint_name"] in pointer

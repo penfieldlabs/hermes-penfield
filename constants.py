@@ -129,7 +129,7 @@ REFRESH_SKEW_SECONDS = 300.0
 
 # The plugin version. plugin.yaml carries the same value for Hermes; a test
 # keeps the two in step.
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 USER_AGENT = f"hermes-penfield/{VERSION}"
 
 # ---------------------------------------------------------------------------

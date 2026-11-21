@@ -118,6 +118,16 @@ class TestSaveContext:
         assert payload["description"] == self.DESCRIPTION
         assert payload["memory_ids"] == [linked]
 
+    def test_the_name_is_sent_where_penfields_mcp_server_looks_for_it(
+        self, api: FakePenfield, api_client: PenfieldClient
+    ) -> None:
+        """So a client connected through MCP cannot save a second checkpoint under it."""
+        _call(api_client, "penfield_save_context", name="handoff", description="Notes.")
+
+        (request,) = api.calls("POST", "/memories")
+        assert request.body["metadata"] == {"checkpoint_name": "handoff"}
+        assert "source_type" not in request.body, "Penfield sets the source itself"
+
     def test_a_name_that_cannot_be_a_tag_is_still_the_name(
         self, api: FakePenfield, api_client: PenfieldClient
     ) -> None:

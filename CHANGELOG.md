@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-21
+
+A checkpoint name used by this plugin is taken for Penfield's MCP server
+too.
+
+### Fixed
+- A checkpoint saved by `penfield_save_context`, or saved before
+  compression, now carries its name where Penfield's MCP server looks
+  for names in use. Before, an AI app connected to the same account
+  through MCP could save a second checkpoint under a name this plugin
+  had already used, and two checkpoints then answered to one name. The
+  other direction already worked: the plugin refuses a name a checkpoint
+  made through MCP uses. Checkpoints saved by earlier versions are not
+  changed.
+
 ## [0.3.2] - 2026-11-21
 
 The agent is told about a tag Penfield does not store, and a profile
@@ -284,7 +299,8 @@ Initial release. Self-contained Hermes Agent memory provider for Penfield.
 - Environment switching via `PENFIELD_ENV` (prod/dev)
 - Auto-awakening: persona and persistent context load on every session
 
-[Unreleased]: https://github.com/penfieldlabs/hermes-penfield/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/penfieldlabs/hermes-penfield/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.3
 [0.3.2]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.2
 [0.3.1]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.1
 [0.3.0]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.0

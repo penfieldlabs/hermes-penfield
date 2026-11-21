@@ -833,7 +833,15 @@ def _stored_tags(tags: Any) -> list[str]:
 
 
 def _public(mem: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in mem.items() if not k.startswith("_")}
+    """Return a memory the way the API shows it.
+
+    Measured on the live API: metadata comes back as it was sent, except
+    for ``checkpoint_name``, which is kept and never shown.
+    """
+    shown = {k: v for k, v in mem.items() if not k.startswith("_")}
+    if isinstance(shown.get("metadata"), dict):
+        shown["metadata"] = {k: v for k, v in shown["metadata"].items() if k != "checkpoint_name"}
+    return shown
 
 
 def _ok(data: Any) -> dict[str, Any]:

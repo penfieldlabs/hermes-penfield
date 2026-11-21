@@ -917,6 +917,11 @@ def save_checkpoint(
             "memory_type": "checkpoint",
             "importance": 0.9,
             "tags": ["checkpoint", "context", *name_tag, *extra_tags],
+            # Penfield's MCP server looks here to see whether a name is taken.
+            # Without it a client connected through MCP could save a second
+            # checkpoint under a name this plugin already used. Penfield
+            # keeps the field and does not show it when the memory is read.
+            "metadata": {"checkpoint_name": name},
         },
     )
 
