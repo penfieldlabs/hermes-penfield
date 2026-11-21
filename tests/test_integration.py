@@ -26,14 +26,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
 from penfield.client import PenfieldClient
-from penfield.constants import MEMORY_SOURCE_TYPES, SEMANTIC_SEARCH_WEIGHTS
+from penfield.constants import API_KEYS_URL, MEMORY_SOURCE_TYPES, SEMANTIC_SEARCH_WEIGHTS
 from penfield.exceptions import NotFoundError, PenfieldError, ValidationError
 from penfield.provider import TOOL_GUIDANCE, PenfieldMemoryProvider
 from penfield.tools import REFLECT_WINDOWS, dispatch, stored_tag
@@ -359,6 +362,36 @@ class TestContexts:
         assert [c["name"] for c in listed["contexts"]] == [name]
         assert member["id"] in [m["id"] for m in by_name["memories"]]
         assert by_id["name"] == name
+
+
+class TestAddressesThePluginShows:
+    """An address the plugin prints has to lead to the page it promises."""
+
+    @staticmethod
+    def _read(url: str) -> str:
+        request = urllib.request.Request(url, headers={"User-Agent": "hermes-penfield-tests"})
+        with urllib.request.urlopen(request, timeout=30) as answer:
+            text: str = answer.read().decode("utf-8", errors="replace")
+        return text
+
+    def test_the_api_keys_address_is_a_page_of_the_portal(self) -> None:
+        """The portal answers every path with the same page, so a link check proves nothing.
+
+        Its script lists the pages it has, and sends any other path to the
+        start page. The address the plugin prints must be on that list.
+        """
+        address = urllib.parse.urlsplit(API_KEYS_URL)
+        origin = f"{address.scheme}://{address.netloc}"
+        scripts = re.findall(r'src="(/assets/[^"]+\.js)"', self._read(origin + "/"))
+        assert scripts, "the portal's start page names no script"
+
+        pages: set[str] = set()
+        for script in scripts:
+            pages |= set(re.findall(r'path:"(/[^"]*)"', self._read(origin + script)))
+
+        assert address.path in pages, (
+            f"{address.path} is not a page of the portal: {sorted(pages)}"
+        )
 
 
 class TestProvider:

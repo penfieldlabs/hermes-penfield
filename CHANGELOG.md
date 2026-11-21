@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-11-22
+
+The address for creating an API key leads to the API keys page.
+
+### Fixed
+- Every place that says where to create an API key now names
+  `https://portal.penfield.app/api-keys`. The address given before,
+  `https://portal.penfield.app/settings/api-keys`, is not a page of the
+  portal, which sends such an address to its start page. It was shown by
+  the setup command when the API key is chosen and when a key is
+  refused, by the API key setting, by the message of a profile that is
+  not connected, and in README and SECURITY.md. Browser sign-in does not
+  use the address, so only people who chose an API key met it.
+
 ## [0.3.3] - 2026-11-21
 
 A checkpoint name used by this plugin is taken for Penfield's MCP server
@@ -299,7 +313,8 @@ Initial release. Self-contained Hermes Agent memory provider for Penfield.
 - Environment switching via `PENFIELD_ENV` (prod/dev)
 - Auto-awakening: persona and persistent context load on every session
 
-[Unreleased]: https://github.com/penfieldlabs/hermes-penfield/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/penfieldlabs/hermes-penfield/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.4
 [0.3.3]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.3
 [0.3.2]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.2
 [0.3.1]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.1

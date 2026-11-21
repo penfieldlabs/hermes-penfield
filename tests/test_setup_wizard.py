@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from penfield import setup_wizard
+from penfield.constants import API_KEYS_URL
 from penfield.provider import PenfieldMemoryProvider
 
 from tests.support.fake_penfield import FakePenfield, refused_url
@@ -146,7 +147,7 @@ class TestANewKey:
     def test_says_where_to_get_one(self, setup) -> None:
         _, _, out = setup()
 
-        assert "https://portal.penfield.app/settings/api-keys" in out
+        assert API_KEYS_URL in out
 
     def test_surrounding_spaces_are_dropped(self, setup) -> None:
         hermes, _, _ = setup(f"  {KEY}\n")

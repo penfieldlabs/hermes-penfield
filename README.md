@@ -76,7 +76,7 @@ at Penfield.
 An API key is the backup for a machine nobody sits at, and the way to
 limit what the agent may do: a key can be read-only, read and write, or
 read, write and delete. Create one at
-[portal.penfield.app](https://portal.penfield.app/settings/api-keys), run
+[portal.penfield.app/api-keys](https://portal.penfield.app/api-keys), run
 `hermes memory setup penfield` and choose the API key.
 
 Paste the key; it is not shown as you type. The plugin checks the key

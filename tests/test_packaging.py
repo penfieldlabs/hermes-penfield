@@ -9,7 +9,7 @@ from pathlib import Path
 
 import penfield
 import pytest
-from penfield.constants import USER_AGENT, VERSION
+from penfield.constants import API_KEYS_URL, USER_AGENT, VERSION
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -57,3 +57,11 @@ def test_nothing_in_the_root_declares_python_dependencies(name: str) -> None:
     tool configuration only, and then cannot enable the plugin unattended.
     """
     assert not (ROOT / name).exists()
+
+
+@pytest.mark.parametrize("name", ["README.md", "SECURITY.md"])
+def test_the_docs_name_the_api_keys_page_the_plugin_names(name: str) -> None:
+    """One address, kept in one place: a second spelling is how a wrong one gets in."""
+    text = (ROOT / name).read_text(encoding="utf-8")
+    named = set(re.findall(r"https://portal\.penfield\.app[^\s)\"'`>]*", text))
+    assert named == {API_KEYS_URL}

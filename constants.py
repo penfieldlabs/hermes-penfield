@@ -107,8 +107,9 @@ CHECKPOINT_DEADLINE = 8.0
 # `hermes memory setup` checks a new API key while the user waits at a prompt.
 SETUP_CHECK_TIMEOUT = 10.0
 
-#: Where a user creates an API key.
-API_KEYS_URL = "https://portal.penfield.app/settings/api-keys"
+#: Where a user creates an API key: the portal's "API Keys" page. A live test
+#: checks that the portal still has a page at this address.
+API_KEYS_URL = "https://portal.penfield.app/api-keys"
 
 #: What a browser sign-in asks Penfield for. ``delete`` because two of the
 #: tools delete (``penfield_disconnect``, ``penfield_delete_artifact``), and
@@ -129,7 +130,7 @@ REFRESH_SKEW_SECONDS = 300.0
 
 # The plugin version. plugin.yaml carries the same value for Hermes; a test
 # keeps the two in step.
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 USER_AGENT = f"hermes-penfield/{VERSION}"
 
 # ---------------------------------------------------------------------------

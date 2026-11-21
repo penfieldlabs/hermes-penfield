@@ -91,7 +91,7 @@ in the Hermes profile directory that this plugin did not write.
 If an API key or token was pasted into a chat, commit or issue:
 
 1. For an API key, revoke it at
-   [portal.penfield.app/settings/api-keys](https://portal.penfield.app/settings/api-keys)
+   [portal.penfield.app/api-keys](https://portal.penfield.app/api-keys)
    and create a new one. For a browser sign-in, run `hermes penfield
    logout`, which revokes it, and sign in again.
 2. Treat the old credential as compromised whether or not it was used.
