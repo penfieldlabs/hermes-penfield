@@ -162,9 +162,9 @@ class BuiltinMirror:
         try:
             self._client.call("memory_delete", path_params={"memory_id": memory_id})
         except PermissionDeniedError:
-            # Deleting needs an API key with the delete permission.
+            # Deleting needs a login with the delete permission.
             logger.info(
-                "Penfield kept memory %s: this API key is not allowed to delete memories",
+                "Penfield kept memory %s: this login is not allowed to delete memories",
                 memory_id,
             )
 

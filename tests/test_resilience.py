@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 
 import pytest
 from penfield.client import PenfieldClient
@@ -58,19 +59,21 @@ def test_briefing_is_fetched_once_and_reused(
 
 
 def test_briefing_gets_a_second_attempt(
-    api: FakePenfield, provider: PenfieldMemoryProvider
+    api: FakePenfield, start_provider: Callable[[], PenfieldMemoryProvider]
 ) -> None:
     """Hermes keeps the prompt for the whole session, so one hiccup must not cost the briefing."""
     api.fail_next[("GET", "/personality/awakening")] = [503]
+    provider = start_provider()
 
     assert api.briefing in provider.system_prompt_block()
     assert len(api.calls("GET", "/personality/awakening")) == 2
 
 
 def test_system_prompt_survives_a_failing_api(
-    api: FakePenfield, provider: PenfieldMemoryProvider
+    api: FakePenfield, start_provider: Callable[[], PenfieldMemoryProvider]
 ) -> None:
     api.fail_next[("GET", "/personality/awakening")] = [503, 503, 503]
+    provider = start_provider()
 
     block = provider.system_prompt_block()
 
@@ -79,10 +82,13 @@ def test_system_prompt_survives_a_failing_api(
 
 
 def test_session_start_does_not_wait_past_the_briefing_deadline(
-    api: FakePenfield, provider: PenfieldMemoryProvider, monkeypatch: pytest.MonkeyPatch
+    api: FakePenfield,
+    start_provider: Callable[[], PenfieldMemoryProvider],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("penfield.provider.BRIEFING_DEADLINE", 0.3)
     api.outage = "hang"
+    provider = start_provider()
 
     started = time.monotonic()
     block = provider.system_prompt_block()

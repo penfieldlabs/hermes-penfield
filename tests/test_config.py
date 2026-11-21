@@ -78,6 +78,51 @@ class TestLoadSave:
         cfg = PenfieldConfig.load()
         assert cfg.api_key == "tm_test_ak_xyz"
 
+    @pytest.mark.parametrize("stray", ["\n", "\r\n", " ", "\t"])
+    def test_load_drops_whitespace_around_the_api_key(
+        self, monkeypatch: pytest.MonkeyPatch, stray: str
+    ) -> None:
+        monkeypatch.setenv("PENFIELD_API_KEY", f"{stray}tm_test_ak_xyz{stray}")
+        assert PenfieldConfig.load().api_key == "tm_test_ak_xyz"
+        assert PenfieldConfig.load(api_key=f"tm_test_ak_abc{stray}").api_key == "tm_test_ak_abc"
+
+    def test_an_api_key_of_nothing_but_whitespace_is_no_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PENFIELD_API_KEY", " \n")
+        assert PenfieldConfig.load().api_key is None
+
+    def test_an_api_key_left_in_the_settings_file_is_not_read_and_the_log_says_so(
+        self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Earlier versions looked there. The key belongs in the profile's ``.env``."""
+        (tmp_path / "penfield").mkdir()
+        (tmp_path / "penfield" / "config.json").write_text(
+            json.dumps({"api_key": "tm_old_ak_SECRETPART"}), encoding="utf-8"
+        )
+
+        cfg = PenfieldConfig.load(tmp_path)
+
+        assert cfg.api_key is None
+        assert "penfield/config.json holds an api_key, which is no longer read" in caplog.text
+        assert "PENFIELD_API_KEY" in caplog.text
+        assert "SECRETPART" not in caplog.text
+
+    def test_a_key_left_in_the_settings_file_is_not_mentioned_once_a_key_is_set(
+        self,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        (tmp_path / "penfield").mkdir()
+        (tmp_path / "penfield" / "config.json").write_text(
+            json.dumps({"api_key": "tm_old_ak_SECRETPART"}), encoding="utf-8"
+        )
+        monkeypatch.setenv("PENFIELD_API_KEY", "tm_test_ak_xyz")
+
+        assert PenfieldConfig.load(tmp_path).api_key == "tm_test_ak_xyz"
+        assert "no longer read" not in caplog.text
+
     def test_token_path(self, tmp_path: pathlib.Path) -> None:
         cfg = PenfieldConfig(env=Environment.PROD)
         assert cfg.token_path(tmp_path) == tmp_path / "penfield" / "tokens.json"

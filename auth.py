@@ -2,17 +2,17 @@
 # Copyright (C) 2026 Penfield
 """Authentication for the Penfield API.
 
-Two flows, both returning the same ``{access_token, refresh_token, ...}``
+Two logins, both ending in the same ``{access_token, refresh_token, ...}``
 shape so the client does not care which produced the tokens:
 
-* **API key exchange** (``POST /api/v2/auth/token``): the default. Sends
-  the API key as a bearer header; the API returns a JWT and a refresh
-  token. The API does not accept the key itself on other endpoints.
-* **OAuth 2.1 device code** (RFC 8628): ``hermes penfield login``.
-  Discovers the endpoints, registers a client when none is given, shows
-  a link and a code, and polls the token endpoint until the user approves
-  in a browser. Logging out revokes these tokens at the server (RFC 7009).
-  See ADR-0005.
+* **Browser sign-in**, the OAuth 2.1 device code flow (RFC 8628):
+  ``hermes penfield login``. Discovers the endpoints, registers a client
+  when none is given, shows a link and a code, and polls the token endpoint
+  until the user approves in a browser. Logging out revokes these tokens at
+  the server (RFC 7009). See ADR-0005.
+* **API key exchange** (``POST /api/v2/auth/token``): sends the API key as
+  a bearer header; the API returns a JWT and usually a refresh token. The
+  API does not accept the key itself on other endpoints.
 
 Tokens are cached to ``{hermes_home}/penfield/tokens.json``, created with
 mode 0o600 and replaced atomically. Refresh uses the documented rotation
@@ -21,13 +21,20 @@ returns a new one. Several Hermes processes share one cache (gateway, CLI,
 cron runs), so before giving up on a token this module checks whether
 another process has already rotated it.
 
+A login is given up only when the server says it is no longer valid. An
+auth server that is down, overloaded or answering nonsense says nothing
+about the login, so the tokens are kept and the next request tries again.
+
 One login is in use at a time (ADR-0023): the API key when one is
 configured, with only the tokens made from that key, and otherwise a saved
-browser sign-in.
+browser sign-in. Tokens are used only with the API address that issued
+them (ADR-0026): the cache records it, and a profile pointed at another
+address starts from no login.
 """
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import json
@@ -36,17 +43,28 @@ import os
 import tempfile
 import threading
 import time
-import urllib.error
+import unicodedata
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .constants import REFRESH_SKEW_SECONDS, REQUEST_TIMEOUT, USER_AGENT
+from . import transport
+from .constants import (
+    API_PREFIX,
+    AUTH_TIMEOUT,
+    DEV_HOSTS,
+    PROD_HOSTS,
+    REFRESH_SKEW_SECONDS,
+    SIGN_IN_SCOPE,
+    USER_AGENT,
+)
 from .exceptions import AuthError, AuthTransportError, TokenExpiredError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .config import PenfieldConfig
 
 logger = logging.getLogger(__name__)
@@ -81,6 +99,12 @@ class TokenSet:
     # Which API key the token was made from (see key_fingerprint); None for a
     # browser sign-in and for caches written before this was recorded.
     key_id: str | None = None
+    # What a browser sign-in was granted, as the auth server reported it
+    # (space-separated scopes); None for API key tokens and older caches.
+    scope: str | None = None
+    # The API address the tokens were issued for; None for caches written
+    # before this was recorded.
+    api_base: str | None = None
 
     def expired(self, *, skew: float = REFRESH_SKEW_SECONDS) -> bool:
         """True if the access token is within ``skew`` seconds of expiry."""
@@ -101,37 +125,93 @@ class TokenSet:
             d["client_id"] = self.client_id
         if self.key_id is not None:
             d["key_id"] = self.key_id
+        if self.scope is not None:
+            d["scope"] = self.scope
+        if self.api_base is not None:
+            d["api_base"] = self.api_base
         return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TokenSet:
-        """Reconstruct a :class:`TokenSet` from a cached dict."""
+        """Reconstruct a :class:`TokenSet` from a cached dict.
+
+        Raises:
+            KeyError, ValueError: If ``d`` is not a usable token record.
+        """
+        if not isinstance(d, dict):
+            raise ValueError("the token cache is not a JSON object")
         return cls(
             access_token=str(d["access_token"]),
-            refresh_token=str(d["refresh_token"]),
+            refresh_token=str(d.get("refresh_token") or ""),
             expires_at=float(d["expires_at"]),
             token_type=str(d.get("token_type", "Bearer")),
             tenant_id=str(d["tenant_id"]) if d.get("tenant_id") else None,
             source=str(d.get("source", "api_key")),
             client_id=str(d["client_id"]) if d.get("client_id") else None,
             key_id=str(d["key_id"]) if d.get("key_id") else None,
+            scope=str(d["scope"]) if d.get("scope") else None,
+            api_base=str(d["api_base"]) if d.get("api_base") else None,
         )
 
 
-def browser_sign_in_saved(hermes_home: str | Path) -> bool:
-    """Return True if the profile's token cache holds a browser sign-in.
+#: Penfield's own API addresses. A login made before the cache recorded its
+#: address was made at one of these, unless ``PENFIELD_URL`` said otherwise.
+_PENFIELD_APIS = frozenset(
+    f"https://{hosts['api']}{API_PREFIX}" for hosts in (PROD_HOSTS, DEV_HOSTS)
+)
 
-    Reads one small file and nothing else, for callers that only need to
-    know whether the profile can sign in without an API key. A cache of
-    tokens made from an API key does not count: without that key they are
-    not used.
+
+def _issued_for(tokens: TokenSet, api_base: str) -> bool:
+    """True if ``tokens`` may be sent to ``api_base``."""
+    if tokens.api_base is not None:
+        return tokens.api_base == api_base
+    return api_base in _PENFIELD_APIS
+
+
+def saved_browser_sign_in(hermes_home: str | Path, api_base: str | None = None) -> TokenSet | None:
+    """Return the browser sign-in in the profile's token cache, if it holds one.
+
+    Reads one small file and nothing else. A cache of tokens made from an
+    API key does not count: without that key they are not used. With
+    ``api_base``, neither does a sign-in made at another address.
     """
     path = Path(hermes_home) / "penfield" / "tokens.json"
     try:
-        cached = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, ValueError):
-        return False
-    return isinstance(cached, dict) and cached.get("source") == "oauth"
+        cached = TokenSet.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    except (KeyError, ValueError, TypeError, OSError):
+        return None
+    if cached.source != "oauth":
+        return None
+    if api_base is not None and not _issued_for(cached, api_base):
+        return None
+    return cached
+
+
+def browser_sign_in_saved(hermes_home: str | Path, api_base: str | None = None) -> bool:
+    """Return True if the profile can sign in without an API key."""
+    return saved_browser_sign_in(hermes_home, api_base) is not None
+
+
+def key_problem(api_key: str) -> str:
+    """Say why ``api_key`` cannot be an API key, or return ``""``.
+
+    A key travels in an HTTP header and is made of visible ASCII. Anything
+    else in it got there on the way: an invisible character copied from a
+    web page, a line break from a file. Sent as it is, such a key fails
+    inside the HTTP library, whose error may quote the header. The answer
+    here names the character and where it is, never the key.
+    """
+    for position, char in enumerate(api_key, 1):
+        if "!" <= char <= "~":
+            continue
+        found = _WHITESPACE_NAMES.get(char) or (
+            f"the character {unicodedata.name(char, f'U+{ord(char):04X}')}"
+        )
+        return f"it contains {found} at position {position}, which cannot be part of a key"
+    return ""
+
+
+_WHITESPACE_NAMES = {" ": "a space", "\t": "a tab", "\n": "a line break", "\r": "a line break"}
 
 
 def key_fingerprint(api_key: str) -> str:
@@ -156,7 +236,7 @@ class PenfieldAuth:
         hermes_home: str | Path | None = None,
         *,
         tokens: TokenSet | None = None,
-        timeout: float = REQUEST_TIMEOUT,
+        timeout: float = AUTH_TIMEOUT,
     ) -> None:
         """Bind config, optional home dir, and optional pre-loaded tokens."""
         self._config = config
@@ -165,6 +245,10 @@ class PenfieldAuth:
         self._api_key = config.api_key
         self._key_id = key_fingerprint(config.api_key) if config.api_key else None
         self._timeout = timeout
+        # True once the server has refused to renew the tokens held here.
+        # They are kept, so the same dead login is not tried again and again,
+        # until a new login shows up in the cache.
+        self._ended = False
         # The provider fetches in the background while tool calls run.
         self._lock = threading.RLock()
         # If no tokens were passed but a cache exists, load lazily on first use.
@@ -189,6 +273,10 @@ class PenfieldAuth:
         """True if any token set is held or cached, in use here or not."""
         return self._tokens is not None or self._read_cache() is not None
 
+    def access_level(self) -> str:
+        """Say what the login in use may do; see :func:`access_level`."""
+        return access_level(self._tokens)
+
     def holds_browser_sign_in(self) -> bool:
         """True if a browser sign-in is held or cached, in use here or not."""
         tokens = self._tokens or self._read_cache()
@@ -198,7 +286,7 @@ class PenfieldAuth:
         """Return an ``Authorization`` header value (``Bearer <access>``)."""
         with self._lock:
             tokens = self._tokens
-            if tokens is None or tokens.expired():
+            if tokens is None or tokens.expired() or self._ended:
                 tokens = self.authenticate()
             return f"{tokens.token_type} {tokens.access_token}"
 
@@ -209,31 +297,46 @@ class PenfieldAuth:
         (see :meth:`_load_cached`). Priority:
 
         1. Valid access token in memory -> return it.
-        2. Valid access token another process cached -> adopt it.
+        2. Another login in the cache (a renewal by another process, or a
+           new sign-in) -> adopt it, and return it if its access token is
+           still valid.
         3. Refresh token present -> attempt refresh (handles rotation).
         4. API key present -> key exchange.
         5. Otherwise -> :class:`AuthError` (caller must run device flow).
+
+        Raises:
+            AuthTransportError: If the auth server did not give a usable
+                answer. The login is kept; try again later.
+            TokenExpiredError: If a saved sign-in is no longer valid.
+            AuthError: If there is no login at all, or the API key is refused.
         """
         with self._lock:
-            if self._tokens is not None and not self._tokens.expired():
+            if self._tokens is not None and not self._tokens.expired() and not self._ended:
                 return self._tokens
-            adopted = self._adopt_cached(require_fresh=True)
-            if adopted is not None:
+            # A newer login in the cache replaces the one held here, whether
+            # or not its access token has run out too: renewing with the
+            # refresh token held here would send one another process has
+            # used already. A login that ended here is replaced by whatever
+            # else the cache holds.
+            adopted = self._adopt_cached(newer_only=not self._ended)
+            if adopted is not None and not adopted.expired():
                 return adopted
-            if self._tokens is not None and self._tokens.refresh_token:
+            if self._tokens is not None and self._tokens.refresh_token and not self._ended:
                 try:
                     return self._refresh(self._tokens.refresh_token)
                 except TokenExpiredError:
                     adopted = self._wait_for_rotation()
                     if adopted is not None:
                         return adopted
-                    # Refresh token dead; fall through to key exchange if possible.
-                    self._tokens = None
+                    # The login is over; fall through to a key exchange if possible.
+                    self._ended = True
             if self._api_key:
                 return self._exchange_api_key(self._api_key)
-            raise AuthError(
-                "no credentials available: run `hermes penfield login` or set PENFIELD_API_KEY"
-            )
+            if self._tokens is not None:
+                # Held but not renewable: refused above, or it never had a refresh token.
+                self._ended = True
+                raise TokenExpiredError(_LOGIN_AGAIN)
+            raise AuthError(_NOT_CONNECTED)
 
     def refresh(self) -> TokenSet:
         """Replace a token the API rejected; called by the client on a 401.
@@ -249,9 +352,10 @@ class PenfieldAuth:
             adopted = self._adopt_cached()
             if adopted is not None:
                 return adopted
-            if self._tokens is None or not self._tokens.refresh_token:
+            if self._tokens is None or not self._tokens.refresh_token or self._ended:
                 if self._api_key:
                     return self._exchange_api_key(self._api_key)
+                self._ended = self._tokens is not None
                 raise TokenExpiredError(_LOGIN_AGAIN)
             try:
                 return self._refresh(self._tokens.refresh_token)
@@ -260,8 +364,8 @@ class PenfieldAuth:
                 if adopted is not None:
                     return adopted
                 if self._api_key:
-                    self._tokens = None
                     return self._exchange_api_key(self._api_key)
+                self._ended = True
                 raise TokenExpiredError(_LOGIN_AGAIN) from exc
 
     def logout(self) -> bool:
@@ -279,6 +383,7 @@ class PenfieldAuth:
             # The cache may hold a browser sign-in this process does not use
             # because an API key is configured; logging out ends that too.
             tokens, self._tokens = self._tokens or self._read_cache(), None
+            self._ended = False
             if self._hermes_home is not None:
                 path = self._config.token_path(self._hermes_home)
                 with contextlib.suppress(OSError):
@@ -288,9 +393,19 @@ class PenfieldAuth:
         return self._revoke(tokens)
 
     def _revoke(self, tokens: TokenSet) -> bool:
-        """Revoke an OAuth token pair (RFC 7009). Never raises."""
+        """Revoke an OAuth token pair (RFC 7009). Never raises.
+
+        The tokens go back to the address that issued them, which need not
+        be the one configured now. Where that is not known they are only
+        forgotten.
+        """
+        issuer = tokens.api_base
+        if issuer is None and _issued_for(tokens, self._config.api_base):
+            issuer = self._config.api_base
+        if issuer is None or not transport.is_safe_address(issuer):
+            return False
         try:
-            endpoint = self._discovery().get("revocation_endpoint")
+            endpoint = _endpoint(self._discovery(issuer), "revocation_endpoint", required=False)
             if not endpoint:
                 return False
             for token, hint in (
@@ -302,10 +417,7 @@ class PenfieldAuth:
                     "POST",
                     endpoint,
                     body=urllib.parse.urlencode(form).encode(),
-                    headers={
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "User-Agent": USER_AGENT,
-                    },
+                    headers=_FORM_HEADERS,
                     raw_error=True,
                     timeout=self._timeout,
                 )
@@ -318,6 +430,9 @@ class PenfieldAuth:
     # API key exchange: the default path
     # ------------------------------------------------------------------
     def _exchange_api_key(self, api_key: str) -> TokenSet:
+        problem = key_problem(api_key)
+        if problem:
+            raise AuthError(f"the API key cannot be used: {problem}")
         url = self._url("/auth/token")
         body = b""  # empty body; key is in the Authorization header
         resp = _http(
@@ -326,7 +441,7 @@ class PenfieldAuth:
         # _http already unwrapped the envelope; resp is the token object.
         ts = self._tokens_from_exchange(resp)
         ts.key_id = key_fingerprint(api_key)
-        self._tokens = ts
+        self._tokens, self._ended = ts, False
         self._persist()
         return ts
 
@@ -364,7 +479,7 @@ class PenfieldAuth:
             raise TokenExpiredError(str(exc)) from exc
         ts = self._tokens_from_exchange(resp)
         ts.key_id = self._tokens.key_id if self._tokens else None
-        self._tokens = ts
+        self._tokens, self._ended = ts, False
         self._persist()
         return ts
 
@@ -382,11 +497,10 @@ class PenfieldAuth:
             # Without the client_id we can't satisfy the spec; treat as expired
             # so the caller falls back to whatever re-auth is available.
             raise TokenExpiredError(
-                "OAuth refresh requires the original client_id; none cached. "
-                "Re-authenticate via `hermes penfield login`."
+                "the saved sign-in does not name its client. "
+                "Run `hermes memory setup penfield` to sign in again."
             )
-        discovery = self._discovery()
-        token_url = discovery["token_endpoint"]
+        token_url = _endpoint(self._discovery(), "token_endpoint")
         body = urllib.parse.urlencode(
             {
                 "grant_type": "refresh_token",
@@ -396,27 +510,27 @@ class PenfieldAuth:
         ).encode()
         try:
             # raw_error=True so OAuth error envelopes (invalid_grant) raise
-            # AuthError rather than envelope-unwrapping logic.
+            # _OAuthError rather than envelope-unwrapping logic.
             resp = _http(
                 "POST",
                 token_url,
                 body=body,
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": USER_AGENT,
-                },
+                headers=_FORM_HEADERS,
                 raw_error=True,
                 timeout=self._timeout,
             )
-        except AuthTransportError:
-            raise  # the API did not answer; the refresh token may still be good
-        except AuthError as exc:
-            raise TokenExpiredError(str(exc)) from exc
+        except _OAuthError as exc:
+            if exc.code in _LOGIN_OVER:
+                raise TokenExpiredError(str(exc)) from exc
+            # Refused for a reason that says nothing about the login itself.
+            raise AuthTransportError(f"the auth server refused the renewal ({exc.code})") from exc
         ts = self._tokens_from_oauth(resp)
-        # Preserve the client_id across rotation (the OAuth refresh response
-        # doesn't echo it back, but it remains valid for subsequent refreshes).
+        # The refresh answer does not repeat the client id, and may leave out
+        # the refresh token (not rotated) and the scope (unchanged).
         ts.client_id = self._tokens.client_id
-        self._tokens = ts
+        ts.refresh_token = ts.refresh_token or refresh_token
+        ts.scope = ts.scope or self._tokens.scope
+        self._tokens, self._ended = ts, False
         self._persist()
         return ts
 
@@ -427,19 +541,28 @@ class PenfieldAuth:
         self,
         *,
         client_id: str | None = None,
-        scope: str = "read write offline_access",
+        scope: str = SIGN_IN_SCOPE,
         poll_interval_override: float | None = None,
+        say: Callable[[str], None] | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> TokenSet:
         """Run the OAuth device code flow.
 
         Performs dynamic client registration when ``client_id`` is not
-        supplied, then requests a device code, prints the verification URL,
-        and polls until the user authorizes or the code expires.
+        supplied, then requests a device code, shows the verification URL,
+        and polls until the user authorizes or the code expires. An auth
+        server that stumbles while the user is in the browser does not end
+        the wait; one that keeps failing is named, while waiting and in the
+        error if the code runs out. A browser sign-in the profile already
+        had is revoked once the new one is stored, since nothing can reach
+        it afterwards.
 
         Args:
             client_id: Pre-registered client id. If absent, registers one.
             scope: OAuth scopes; ``offline_access`` is required for refresh.
             poll_interval_override: Tests inject this to avoid real sleeps.
+            say: Shows one line to the user; ``print`` by default.
+            sleep: Pauses between polls; ``time.sleep`` by default.
 
         Returns:
             The token set obtained on success.
@@ -449,67 +572,72 @@ class PenfieldAuth:
                 fails.
         """
         discovery = self._discovery()
+        device_auth_url = _endpoint(discovery, "device_authorization_endpoint")
+        token_url = _endpoint(discovery, "token_endpoint")
         cid = client_id or self._register_client(discovery, scope)
-
-        device_auth_url = discovery["device_authorization_endpoint"]
-        token_url = discovery["token_endpoint"]
 
         data = urllib.parse.urlencode({"client_id": cid, "scope": scope}).encode()
         resp = _http(
-            "POST",
-            device_auth_url,
-            body=data,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": USER_AGENT,
-            },
+            "POST", device_auth_url, body=data, headers=_FORM_HEADERS, timeout=self._timeout
         )
-        device_code = resp["device_code"]
-        user_code = resp.get("user_code", "")
-        verification_uri = resp.get("verification_uri_complete") or resp.get(
-            "verification_uri", ""
+        device_code = _field(resp, "device_code")
+        user_code = str(resp.get("user_code") or "")
+        verification_uri = str(
+            resp.get("verification_uri_complete") or resp.get("verification_uri") or ""
         )
-        interval = float(resp.get("interval", 5))
-        expires_in = float(resp.get("expires_in", 900))
+        interval = _seconds(resp.get("interval"), 5.0)
+        expires_in = _seconds(resp.get("expires_in"), 900.0)
         if poll_interval_override is not None:
             interval = poll_interval_override
 
+        # Flushed, so the link shows at once even when output is piped.
+        show = say or (lambda line: print(line, flush=True))
         if verification_uri:
-            # Surface to the user via stdout for the CLI; tests ignore this.
-            # Flushed, so the link shows at once even when output is piped.
-            print(
+            show(
                 f"To authorize, visit: {verification_uri}"
                 + (f" (code: {user_code})" if user_code else "")
-                + f"\nThe code is valid for {round(expires_in / 60)} minutes.",
-                flush=True,
             )
+            show(f"The code is valid for {round(expires_in / 60)} minutes.")
 
+        form = urllib.parse.urlencode(
+            {
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "device_code": device_code,
+                "client_id": cid,
+            }
+        ).encode()
+        pause = sleep or time.sleep
         deadline = time.time() + expires_in
+        # Polls in a row the auth server gave no usable answer to, and why.
+        unanswered, problem = 0, ""
         while time.time() < deadline:
-            form = urllib.parse.urlencode(
-                {
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                    "device_code": device_code,
-                    "client_id": cid,
-                }
-            ).encode()
             try:
                 token_resp = _http(
                     "POST",
                     token_url,
                     body=form,
-                    headers={
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "User-Agent": USER_AGENT,
-                    },
+                    headers=_FORM_HEADERS,
                     raw_error=True,
+                    timeout=self._timeout,
                 )
             except _OAuthPendingError:
-                time.sleep(interval)
+                # Not approved yet.
+                unanswered = 0
+                pause(interval)
+                continue
+            except AuthTransportError as exc:
+                # No usable answer this time. The code is still good, so the
+                # wait goes on; past a stumble or two the user is told why
+                # nothing happens.
+                unanswered, problem = unanswered + 1, str(exc)
+                if unanswered == _UNANSWERED_POLLS_BEFORE_SAYING:
+                    show(f"The sign-in server is not answering: {problem}. Still trying.")
+                pause(interval)
                 continue
             except _OAuthSlowDownError:
+                unanswered = 0
                 interval += 5
-                time.sleep(interval)
+                pause(interval)
                 continue
             except _OAuthError as exc:
                 raise AuthError(_DEVICE_FLOW_FAILURES.get(exc.code, str(exc))) from exc
@@ -517,24 +645,41 @@ class PenfieldAuth:
             # Persist the client_id on the token set so subsequent refresh()
             # calls can satisfy the OAuth refresh spec (which requires it).
             ts.client_id = cid
-            self._tokens = ts
+            ts.scope = ts.scope or scope
+            replaced = self._sign_in_to_replace()
+            self._tokens, self._ended = ts, False
             self._persist()
+            if replaced is not None:
+                self._revoke(replaced)
             return ts
+        if unanswered:
+            raise AuthError(_NO_ANSWER_UNTIL_EXPIRY.format(problem=problem))
         raise AuthError(_DEVICE_FLOW_FAILURES["expired_token"])
 
-    def _discovery(self) -> dict[str, str]:
+    def _sign_in_to_replace(self) -> TokenSet | None:
+        """Return the browser sign-in a new one is about to overwrite, if any.
+
+        The cache is asked first: another process may have renewed the
+        sign-in since this one loaded it.
+        """
+        tokens = self._read_cache() or self._tokens
+        if tokens is None or tokens.source != "oauth" or not tokens.client_id:
+            return None
+        return tokens
+
+    def _discovery(self, api_base: str | None = None) -> dict[str, Any]:
         """Fetch OAuth authorization-server metadata from the API host.
 
         The docs direct clients to ``https://api(-dev).penfield.app/.well-known/
         oauth-authorization-server``. We resolve the well-known URL from the
-        configured api_base (stripping the /api/v2 prefix).
+        api_base (the configured one by default), stripping the /api/v2 prefix.
         """
-        base = self._config.api_base.removesuffix("/api/v2").removesuffix(API_PREFIX)
+        base = (api_base or self._config.api_base).removesuffix(API_PREFIX)
         well_known = f"{base}/.well-known/oauth-authorization-server"
-        return _http("GET", well_known, headers=_default_headers())
+        return _http("GET", well_known, headers=_default_headers(), timeout=self._timeout)
 
-    def _register_client(self, discovery: dict[str, str], scope: str) -> str:
-        reg_url = discovery.get("registration_endpoint")
+    def _register_client(self, discovery: dict[str, Any], scope: str) -> str:
+        reg_url = _endpoint(discovery, "registration_endpoint", required=False)
         if not reg_url:
             raise AuthError(
                 "no client_id given and server offers no dynamic registration; provide a client_id"
@@ -551,13 +696,8 @@ class PenfieldAuth:
                 "scope": scope,
             }
         ).encode()
-        resp = _http(
-            "POST",
-            reg_url,
-            body=body,
-            headers=_default_headers(),
-        )
-        return str(resp["client_id"])
+        resp = _http("POST", reg_url, body=body, headers=_default_headers(), timeout=self._timeout)
+        return _field(resp, "client_id")
 
     # ------------------------------------------------------------------
     # Token shape normalization
@@ -565,9 +705,10 @@ class PenfieldAuth:
     @staticmethod
     def _tokens_from_exchange(data: dict[str, Any]) -> TokenSet:
         return TokenSet(
-            access_token=str(data["access_token"]),
-            refresh_token=str(data["refresh_token"]),
-            expires_at=time.time() + float(data.get("expires_in", 86400)),
+            access_token=_field(data, "access_token"),
+            # The API may answer without a refresh token; the key renews then.
+            refresh_token=str(data.get("refresh_token") or ""),
+            expires_at=time.time() + _seconds(data.get("expires_in"), 86400.0),
             token_type=str(data.get("token_type", "Bearer")),
             tenant_id=str(data["tenant_id"]) if data.get("tenant_id") else None,
             source="api_key",
@@ -579,11 +720,13 @@ class PenfieldAuth:
         # (not /auth/refresh). client_id is set by the caller; the factory
         # doesn't see it because the OAuth token response doesn't echo it.
         return TokenSet(
-            access_token=str(data["access_token"]),
-            refresh_token=str(data["refresh_token"]),
-            expires_at=time.time() + float(data.get("expires_in", 86400)),
+            access_token=_field(data, "access_token"),
+            # Present only when ``offline_access`` was granted.
+            refresh_token=str(data.get("refresh_token") or ""),
+            expires_at=time.time() + _seconds(data.get("expires_in"), 86400.0),
             token_type=str(data.get("token_type", "Bearer")),
             source="oauth",
+            scope=str(data["scope"]) if data.get("scope") else None,
         )
 
     # ------------------------------------------------------------------
@@ -599,6 +742,7 @@ class PenfieldAuth:
         """
         if self._hermes_home is None or self._tokens is None:
             return
+        self._tokens.api_base = self._config.api_base
         path = self._config.token_path(self._hermes_home)
         tmp_name = ""
         try:
@@ -621,7 +765,8 @@ class PenfieldAuth:
         path = self._config.token_path(self._hermes_home)
         try:
             return TokenSet.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, KeyError, ValueError, OSError):
+        except (KeyError, ValueError, TypeError, OSError):
+            # Missing, unreadable or not a token record: the same as no cache.
             return None
 
     def _load_cached(self) -> TokenSet | None:
@@ -631,30 +776,36 @@ class PenfieldAuth:
         Without one, only a browser sign-in is. Anything else in the cache
         is a different login and possibly a different account: tokens of
         another key, a sign-in an API key has replaced, or tokens of a key
-        that has since been removed.
+        that has since been removed. Tokens issued for another address are
+        not this profile's login either, and are never sent to this one.
         """
         cached = self._read_cache()
-        if cached is None:
+        if cached is None or not _issued_for(cached, self._config.api_base):
             return None
         if self._key_id is not None:
             return cached if cached.key_id == self._key_id else None
         return cached if cached.source == "oauth" else None
 
-    def _adopt_cached(self, *, require_fresh: bool = False) -> TokenSet | None:
+    def _adopt_cached(self, *, newer_only: bool = False) -> TokenSet | None:
         """Take over a token another process wrote to the cache, if there is one.
 
         Returns the cached token set when it differs from the one held in
-        memory, else ``None``. With ``require_fresh`` an expired cached
-        token is ignored.
+        memory, else ``None``. Its access token may have run out; its
+        refresh token is then the one to renew with.
+
+        With ``newer_only`` a cached set that runs out before the one held
+        is left alone. That is not another process's work: it is what this
+        process could not replace when the cache could not be written.
         """
         cached = self._load_cached()
         if cached is None:
             return None
-        if self._tokens is not None and cached.access_token == self._tokens.access_token:
-            return None
-        if require_fresh and cached.expired():
-            return None
-        self._tokens = cached
+        if self._tokens is not None:
+            if cached.access_token == self._tokens.access_token:
+                return None
+            if newer_only and cached.expires_at < self._tokens.expires_at:
+                return None
+        self._tokens, self._ended = cached, False
         return cached
 
     def _wait_for_rotation(self) -> TokenSet | None:
@@ -682,13 +833,27 @@ class PenfieldAuth:
 # raw OAuth error envelopes) so it ships its own small helper rather than
 # importing the client (which would create a circular dependency).
 
-from .constants import API_PREFIX  # noqa: E402  (local to module)
-
 #: Shown when a saved sign-in has run out or been revoked.
 _LOGIN_AGAIN = (
-    "the saved Penfield login is no longer valid: "
-    "run `hermes penfield login` or set PENFIELD_API_KEY"
+    "the saved Penfield sign-in is no longer valid (it ran out or was revoked): "
+    "run `hermes memory setup penfield` to sign in again"
 )
+
+#: Shown when a profile has no login at all.
+_NOT_CONNECTED = (
+    "Penfield is not connected: run `hermes memory setup penfield` to sign in "
+    "with your browser or to enter an API key"
+)
+
+#: Answers of the token endpoint that mean the login itself is over (RFC 6749
+#: section 5.2). Anything else it refuses with says nothing about the login.
+_LOGIN_OVER = frozenset({"invalid_grant", "invalid_client", "unauthorized_client"})
+
+_FORM_HEADERS = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Accept": "application/json",
+    "User-Agent": USER_AGENT,
+}
 
 
 class _OAuthError(AuthError):
@@ -707,6 +872,15 @@ _DEVICE_FLOW_FAILURES = {
     "invalid_grant": "the code expired before it was approved; run the login again",
     "access_denied": "the sign-in was refused in the browser",
 }
+
+#: Shown when the code ran out while the auth server gave no usable answer:
+#: the user may well have approved it.
+_NO_ANSWER_UNTIL_EXPIRY = (
+    "the code ran out while the sign-in server was not answering: {problem}; run the login again"
+)
+
+#: How many polls in a row may go unanswered before the user is told.
+_UNANSWERED_POLLS_BEFORE_SAYING = 3
 
 
 class _OAuthPendingError(Exception):
@@ -730,6 +904,43 @@ def _default_headers(auth_value: str | None = None) -> dict[str, str]:
     return h
 
 
+def _field(answer: dict[str, Any], name: str) -> str:
+    """Return a field an auth answer must carry.
+
+    Raises:
+        AuthTransportError: If it is missing. Whatever answered was not the
+            auth server doing its job, which says nothing about the login.
+    """
+    value = answer.get(name)
+    if not isinstance(value, str) or not value:
+        raise AuthTransportError(f"the auth server's answer held no {name}")
+    return value
+
+
+def _seconds(value: object, default: float) -> float:
+    """Read a number of seconds from an auth answer, or use ``default``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return float(value) if value >= 0 else default
+
+
+def _endpoint(discovery: dict[str, Any], name: str, *, required: bool = True) -> str:
+    """Return an endpoint from the auth server's metadata.
+
+    Raises:
+        AuthTransportError: If a required endpoint is missing, or the address
+            is one a login must not be sent to (not HTTPS, not this machine).
+    """
+    url = discovery.get(name)
+    if not isinstance(url, str) or not url:
+        if required:
+            raise AuthTransportError(f"the auth server's metadata names no {name}")
+        return ""
+    if not transport.is_safe_address(url):
+        raise AuthTransportError(f"the auth server's {name} is not an https address")
+    return url
+
+
 def _http(
     method: str,
     url: str,
@@ -737,58 +948,108 @@ def _http(
     body: bytes | None = None,
     headers: dict[str, str],
     raw_error: bool = False,
-    timeout: float = REQUEST_TIMEOUT,
+    timeout: float = AUTH_TIMEOUT,
 ) -> dict[str, Any]:
     """Send a request and return the parsed JSON envelope ``data`` field.
 
-    For OAuth token endpoints the success body is the token object itself
-    (no ``status`` envelope), so we return the whole object in that case
-    (``raw_error=True`` path).
+    For OAuth endpoints (``raw_error=True``) the success body is the answer
+    itself, without a ``status`` envelope, and a refusal carries its reason
+    in an ``error`` field.
 
     Raises:
-        AuthTransportError: If the server could not be reached or did not answer.
-        AuthError: On a non-2xx response or an unreadable body.
+        AuthTransportError: If no usable answer arrived: the server could
+            not be reached, failed (5xx), was too busy (429), redirected, or
+            sent something that is not the expected JSON. None of that says
+            anything about the login.
+        AuthError: If the server refused the request.
     """
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = resp.read()
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = exc.read().decode(errors="replace")
-        except OSError:
-            detail = ""
-        finally:
-            exc.close()
-        # OAuth device-flow error envelopes: {"error": "authorization_pending"}
-        if raw_error:
-            try:
-                err = json.loads(detail)
-            except (json.JSONDecodeError, ValueError):
-                err = {}
-            err_code = str(err.get("error", "")) if isinstance(err, dict) else ""
-            if err_code == "authorization_pending":
-                raise _OAuthPendingError from exc
-            if err_code == "slow_down":
-                raise _OAuthSlowDownError from exc
-            raise _OAuthError(err_code or str(exc.code)) from exc
-        if exc.code >= 500:
-            raise AuthTransportError(f"auth server error ({exc.code})") from exc
-        refused = AuthError(f"auth request failed ({exc.code}): {detail[:200]}")
-        refused.status = exc.code
-        raise refused from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        answer = transport.send(req, timeout)
+    except transport.NoAnswerError as exc:
         raise AuthTransportError(f"auth transport error: {exc}") from exc
 
-    if not payload:
+    status = answer.status
+    if status >= 500 or status == 429:
+        raise AuthTransportError(f"auth server error ({status})")
+    if answer.redirect_target:
+        raise AuthTransportError(
+            f"unexpected redirect ({status}) to {answer.redirect_target}; not followed"
+        )
+    if status >= 300:
+        detail = answer.body.decode(errors="replace")
+        if raw_error:
+            # OAuth error envelopes: {"error": "authorization_pending"}
+            try:
+                err = json.loads(detail)
+            except ValueError:
+                err = {}
+            err_code = str(err.get("error") or "") if isinstance(err, dict) else ""
+            if err_code == "authorization_pending":
+                raise _OAuthPendingError
+            if err_code == "slow_down":
+                raise _OAuthSlowDownError
+            if err_code in {"server_error", "temporarily_unavailable"}:
+                raise AuthTransportError(f"auth server error ({err_code})")
+            raise _OAuthError(err_code or str(status))
+        refused = AuthError(f"auth request failed ({status}): {' '.join(detail.split())[:200]}")
+        refused.status = status
+        raise refused
+
+    if not answer.body:
         return {}
     try:
-        parsed = json.loads(payload.decode())
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise AuthError("auth response was not JSON") from exc
-    # OAuth token endpoint returns the token object directly.
+        parsed = json.loads(answer.body.decode())
+    except ValueError as exc:
+        raise AuthTransportError("the auth server's answer could not be read") from exc
+    if not isinstance(parsed, dict):
+        raise AuthTransportError("the auth server's answer could not be read")
+    # OAuth endpoints answer with the object itself.
     if raw_error or "data" not in parsed:
         return parsed
-    if parsed.get("status") != "success":
-        raise AuthError(f"auth response not success: {parsed!r}")
-    return parsed["data"]
+    data = parsed["data"]
+    if parsed.get("status") != "success" or not isinstance(data, dict):
+        raise AuthTransportError("the auth server's answer could not be read")
+    return data
+
+
+_ACCESS_LEVELS = {
+    frozenset({"read"}): "read only",
+    frozenset({"read", "write"}): "read and write",
+    frozenset({"read", "write", "delete"}): "read, write and delete",
+}
+
+
+def granted_scopes(tokens: TokenSet) -> frozenset[str] | None:
+    """Return what ``tokens`` may do, or ``None`` if they do not say.
+
+    A browser sign-in records the scope the auth server granted. An access
+    token made from an API key carries a ``scopes`` claim. The claim is read
+    for display only; the API enforces it.
+    """
+    if tokens.scope:
+        return frozenset(tokens.scope.split())
+    parts = tokens.access_token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded))
+    except ValueError:
+        return None
+    if not isinstance(claims, dict):
+        return None
+    found = claims.get("scopes", claims.get("scope"))
+    if isinstance(found, str):
+        return frozenset(found.split())
+    if isinstance(found, list) and all(isinstance(item, str) for item in found):
+        return frozenset(found)
+    return None
+
+
+def access_level(tokens: TokenSet | None) -> str:
+    """Say in words what a login may do: ``read only``, ..., or ``unknown``."""
+    scopes = granted_scopes(tokens) if tokens is not None else None
+    if scopes is None:
+        return "unknown"
+    return _ACCESS_LEVELS.get(scopes & {"read", "write", "delete"}, "unknown")

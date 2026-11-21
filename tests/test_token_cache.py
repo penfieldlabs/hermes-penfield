@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 import pytest
-from penfield.auth import PenfieldAuth, TokenSet, key_fingerprint
+from penfield.auth import PenfieldAuth, TokenSet, key_fingerprint, saved_browser_sign_in
 from penfield.config import Environment, PenfieldConfig
 from penfield.exceptions import AuthError
 
@@ -46,6 +46,7 @@ def _issued(api: FakePenfield, *, expires_in: float, key: str | None = None) -> 
         "cached-refresh",
         expires_at=time.time() + expires_in,
         key_id=key_fingerprint(key) if key else None,
+        api_base=api.url,
     )
 
 
@@ -98,7 +99,9 @@ def test_a_saved_login_the_server_no_longer_accepts_says_what_to_do(
     _cache(tmp_path, TokenSet("dead-access", "dead-refresh", expires_at=time.time() + 3600))
     auth = PenfieldAuth(_config(api), tmp_path)
 
-    with pytest.raises(TokenExpiredError, match="no longer valid: run `hermes penfield login`"):
+    with pytest.raises(
+        TokenExpiredError, match=r"no longer valid.*run `hermes memory setup penfield`"
+    ):
         auth.refresh()
 
 
@@ -168,7 +171,7 @@ def test_tokens_of_a_key_that_was_removed_are_not_used(api: FakePenfield, tmp_pa
     without_key = PenfieldAuth(_config(api), tmp_path)
 
     assert without_key.is_authenticated() is False
-    with pytest.raises(AuthError, match="no credentials available"):
+    with pytest.raises(AuthError, match="Penfield is not connected"):
         without_key.get_header()
 
 
@@ -181,3 +184,107 @@ def test_a_saved_sign_in_is_used_when_no_api_key_is_configured(
 
     assert PenfieldAuth(_config(api), tmp_path).get_header() == "Bearer cached-access"
     assert _exchanged_keys(api) == []
+
+
+# ---------------------------------------------------------------------------
+# Tokens belong to the address that issued them
+# ---------------------------------------------------------------------------
+
+
+def _sign_in_at(api: FakePenfield, home: Path) -> dict[str, str]:
+    """Sign in with a browser at ``api`` and return the cache it leaves."""
+    api.approve_sign_ins = True
+    PenfieldAuth(_config(api), home).device_code_flow()
+    saved: dict[str, str] = json.loads((home / "penfield" / "tokens.json").read_text())
+    return saved
+
+
+def _credentials_seen(api: FakePenfield) -> str:
+    """Everything that could carry a login in the requests ``api`` received."""
+    return " ".join(f"{c.authorization} {c.body}" for c in api.calls())
+
+
+def test_the_cache_records_the_address_the_tokens_were_issued_for(
+    api: FakePenfield, tmp_path: Path
+) -> None:
+    assert _sign_in_at(api, tmp_path)["api_base"] == api.url
+
+    key_home = tmp_path / "key"
+    PenfieldAuth(_config(api, api_key=KEY), key_home).get_header()
+    assert json.loads((key_home / "penfield" / "tokens.json").read_text())["api_base"] == api.url
+
+
+def test_a_sign_in_is_not_sent_to_another_address(api: FakePenfield, tmp_path: Path) -> None:
+    """Point the profile somewhere else and the saved sign-in stays at home."""
+    saved = _sign_in_at(api, tmp_path)
+
+    with FakePenfield() as elsewhere:
+        auth = PenfieldAuth(_config(elsewhere), tmp_path)
+        assert auth.is_authenticated() is False
+        with pytest.raises(AuthError, match="Penfield is not connected"):
+            auth.get_header()
+        assert elsewhere.calls() == []
+        assert saved_browser_sign_in(tmp_path, elsewhere.url) is None
+
+    assert saved_browser_sign_in(tmp_path, api.url) is not None
+    assert json.loads((tmp_path / "penfield" / "tokens.json").read_text()) == saved
+
+
+def test_tokens_of_an_api_key_are_not_sent_to_another_address(
+    api: FakePenfield, tmp_path: Path
+) -> None:
+    """The key itself is the login there; tokens issued here are not."""
+    PenfieldAuth(_config(api, api_key=KEY), tmp_path).get_header()
+    issued_here = json.loads((tmp_path / "penfield" / "tokens.json").read_text())
+
+    with FakePenfield() as elsewhere:
+        header = PenfieldAuth(_config(elsewhere, api_key=KEY), tmp_path).get_header()
+
+        assert [c.path for c in elsewhere.calls()] == ["/auth/token"]
+        assert header.removeprefix("Bearer ") in elsewhere.valid_access_tokens
+        seen = _credentials_seen(elsewhere)
+        assert issued_here["access_token"] not in seen
+        assert issued_here["refresh_token"] not in seen
+
+
+def test_logging_out_revokes_a_sign_in_where_it_was_issued(
+    api: FakePenfield, tmp_path: Path
+) -> None:
+    saved = _sign_in_at(api, tmp_path)
+
+    with FakePenfield() as elsewhere:
+        assert PenfieldAuth(_config(elsewhere), tmp_path).logout() is True
+        assert elsewhere.calls() == []
+
+    assert api.revoked == [saved["refresh_token"], saved["access_token"]]
+    assert not (tmp_path / "penfield" / "tokens.json").exists()
+
+
+class TestACacheWrittenBeforeTheAddressWasRecorded:
+    """Earlier versions did not record it. Those logins were made at Penfield's own API."""
+
+    def _legacy(self, home: Path) -> None:
+        tokens = TokenSet("legacy-access", "legacy-refresh", time.time() + 3600, source="oauth")
+        assert "api_base" not in tokens.to_dict()
+        _cache(home, tokens)
+
+    @pytest.mark.parametrize("env", [Environment.PROD, Environment.DEV])
+    def test_it_is_used_at_penfields_own_addresses(self, tmp_path: Path, env: Environment) -> None:
+        self._legacy(tmp_path)
+        auth = PenfieldAuth(PenfieldConfig(env=env), tmp_path)
+        assert auth.get_header() == "Bearer legacy-access"
+
+    def test_it_is_not_sent_to_a_custom_address(self, api: FakePenfield, tmp_path: Path) -> None:
+        self._legacy(tmp_path)
+        auth = PenfieldAuth(_config(api), tmp_path)
+        with pytest.raises(AuthError, match="Penfield is not connected"):
+            auth.get_header()
+        assert api.calls() == []
+
+    def test_logging_out_at_a_custom_address_only_forgets_it(
+        self, api: FakePenfield, tmp_path: Path
+    ) -> None:
+        self._legacy(tmp_path)
+        assert PenfieldAuth(_config(api), tmp_path).logout() is False
+        assert api.calls() == []
+        assert not (tmp_path / "penfield" / "tokens.json").exists()

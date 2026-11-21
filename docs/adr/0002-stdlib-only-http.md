@@ -1,7 +1,7 @@
 # ADR-0002: Stdlib-only HTTP, client-side rate limit, jittered backoff
 
 - **Date:** 2026-06-29
-- **Status:** Accepted. Timeouts, retries and the Python floor are amended by [ADR-0013](0013-never-stall-the-agent.md).
+- **Status:** Accepted. Timeouts, retries and the Python floor are amended by [ADR-0013](0013-never-stall-the-agent.md); redirects and unexpected answers by [ADR-0026](0026-one-door-for-http.md).
 
 ## Context
 

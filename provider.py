@@ -39,7 +39,7 @@ from .constants import (
     RECALL_DEADLINE,
     RECALL_TIMEOUT,
 )
-from .exceptions import PenfieldError
+from .exceptions import ConfigError, PenfieldError, PermissionDeniedError
 from .mirror import BuiltinMirror
 from .tools import PENFIELD_TOOL_SCHEMAS, dispatch, save_checkpoint, search_memories
 
@@ -81,6 +81,8 @@ MIRROR_DRAIN_SECONDS = 3.0
 #: Characters of each memory shown by auto-recall. Enough to carry the point;
 #: the full id is shown so the agent can fetch the rest.
 AUTO_RECALL_ITEM_CHARS = 500
+
+NOT_INITIALIZED = "Penfield is not initialized"
 
 
 class _Deferred:
@@ -158,6 +160,8 @@ class PenfieldMemoryProvider(_ProviderBase):
         self._briefing_problem_logged: bool = False
         self._recalled: int = 0
         self._mirror: BuiltinMirror | None = None
+        #: Why Penfield is off for this session, when a setting stopped it.
+        self._problem: str = ""
 
     # ------------------------------------------------------------------
     # Identity / availability (no network)
@@ -175,16 +179,16 @@ class PenfieldMemoryProvider(_ProviderBase):
         """
         if read_setting("PENFIELD_API_KEY"):
             return True
-        homes = [self._hermes_home, default_hermes_home()]
-        if any(h and browser_sign_in_saved(h) for h in homes):
-            return True
+        for home in (self._hermes_home, default_hermes_home()):
+            if home and browser_sign_in_saved(home, _api_base_in_use(home)):
+                return True
         return bool(self._auth and self._auth.is_authenticated())
 
     def unavailable_reason(self) -> str:
         """Say what is missing when :meth:`is_available` is False."""
         return (
-            "No Penfield credentials were found. Run `hermes memory setup` and enter an "
-            f"API key (create one at {API_KEYS_URL})."
+            "Penfield is not connected. Run `hermes memory setup penfield` to sign in "
+            f"with your browser, or to enter an API key (create one at {API_KEYS_URL})."
         )
 
     # ------------------------------------------------------------------
@@ -203,7 +207,16 @@ class PenfieldMemoryProvider(_ProviderBase):
         self._session_id = session_id
         self._hermes_home = str(kwargs.get("hermes_home") or "")
         self._agent_context = str(kwargs.get("agent_context") or "primary")
-        self._config = PenfieldConfig.load(self._hermes_home or None)
+        self._config = self._auth = self._client = self._mirror = self._briefing = None
+        self._problem = ""
+        try:
+            self._config = PenfieldConfig.load(self._hermes_home or None)
+        except ConfigError as exc:
+            # Hermes keeps a provider whose initialize() raised, tools and
+            # all. Stay in place and say why at every point of contact.
+            self._problem = str(exc)
+            logger.error("Penfield is off for this session: %s", exc)
+            return
         self._auth = PenfieldAuth(self._config, self._hermes_home or None)
         self._client = PenfieldClient(self._auth, self._config)
         self._briefing_text = ""
@@ -243,9 +256,18 @@ class PenfieldMemoryProvider(_ProviderBase):
         went wrong and correct the call.
         """
         if self._client is None:
-            return json.dumps({"error": "Penfield is not initialized", "tool": tool_name})
+            reason = f"Penfield is off: {self._problem}" if self._problem else NOT_INITIALIZED
+            return json.dumps({"error": reason, "tool": tool_name})
         try:
             return dispatch(self._client, tool_name, args)
+        except PermissionDeniedError as exc:
+            # Say what the login may do, so the agent stops trying and tells the user.
+            level = self._client.access_level()
+            limit = "" if level == "unknown" else f" This Penfield login may {level}."
+            logger.warning("tool %s was refused: %s", tool_name, exc)
+            return json.dumps(
+                {"error": f"Penfield refused this: {exc}.{limit}", "tool": tool_name}
+            )
         except PenfieldError as exc:
             logger.warning("tool %s failed: %s", tool_name, exc)
             return json.dumps({"error": str(exc), "tool": tool_name})
@@ -292,13 +314,20 @@ class PenfieldMemoryProvider(_ProviderBase):
         Works before :meth:`initialize` and never includes a secret.
         """
         home = self._hermes_home or default_hermes_home()
-        cfg = self._config or PenfieldConfig.load(home)
+        try:
+            cfg = self._config or PenfieldConfig.load(home)
+        except ConfigError as exc:
+            return {"problem": str(exc)}
         if cfg.api_key:
             credentials = "API key"
-        elif browser_sign_in_saved(home):
-            credentials = "saved login"
+        elif browser_sign_in_saved(home, cfg.api_base):
+            credentials = "browser sign-in"
         else:
             credentials = "none"
+        # What the login may do, as far as tokens already on disk say; no request.
+        level = (self._auth or PenfieldAuth(cfg, home)).access_level()
+        if level != "unknown":
+            credentials += f" (may {level})"
         recall = (
             f"on (up to {cfg.recall_limit} memories, minimum score {cfg.recall_threshold})"
             if cfg.auto_recall
@@ -326,6 +355,14 @@ class PenfieldMemoryProvider(_ProviderBase):
         prompt it built for the rest of the session, so a late briefing is
         only picked up if the prompt is built again.
         """
+        if self._problem:
+            return (
+                f"Penfield memory is off in this session: {self._problem}. The penfield_* "
+                "tools will fail until that setting is corrected. Tell the user if they "
+                "ask about memory."
+            )
+        if self._client is None:
+            return ""
         if not self._briefing_text and self._briefing is not None:
             self._briefing_text = str(self._briefing.result(BRIEFING_DEADLINE) or "")
             problem = self._briefing.problem()
@@ -387,10 +424,16 @@ class PenfieldMemoryProvider(_ProviderBase):
         shown = shown[: config.recall_limit]
         if not shown:
             return ""
-        self._recalled = len(shown)
         lines = ["[Penfield memory: recalled context]"]
-        lines += [_recall_line(it) for it in shown]
-        return "\n".join(lines)[: config.max_prefetch_chars]
+        room = config.max_prefetch_chars - len(lines[0])
+        for item in shown:
+            line = _recall_line(item, max_chars=room - 1 if len(lines) == 1 else None)
+            if len(line) + 1 > room:
+                break  # whole memories only; the rest is a search away
+            lines.append(line)
+            room -= len(line) + 1
+        self._recalled = len(lines) - 1
+        return "\n".join(lines) if self._recalled else ""
 
     def recall_status(self) -> Any:
         """Tell Hermes what the last auto-recall injected, for its recall indicator."""
@@ -491,18 +534,40 @@ class PenfieldMemoryProvider(_ProviderBase):
 # ---------------------------------------------------------------------------
 
 
-def _recall_line(item: dict[str, Any]) -> str:
-    """Format one recalled memory for the context Hermes injects."""
+def _api_base_in_use(hermes_home: str) -> str | None:
+    """Return the API address the profile is set to, or ``None`` if its settings are unusable.
+
+    ``None`` lets any saved sign-in count, so that the provider is started
+    and can say which setting is wrong.
+    """
+    try:
+        return PenfieldConfig.load(hermes_home).api_base
+    except ConfigError:
+        return None
+
+
+_FETCH_THE_REST = " [...] (penfield_fetch this id for the rest)"
+
+
+def _recall_line(item: dict[str, Any], *, max_chars: int | None = None) -> str:
+    """Format one recalled memory for the context Hermes injects.
+
+    With ``max_chars`` the line is made to fit by shortening the memory's
+    text, and says so the way a memory cut by the search does.
+    """
     content = " ".join(str(item.get("content") or "").split())
-    if item.get("truncated"):
-        content += " [...] (penfield_fetch this id for the rest)"
     if item.get("source_type") == "document":
         kind = f"document {item.get('filename') or ''}".strip()
     else:
         kind = str(item.get("memory_type") or "")
     details = [d for d in (kind, str(item.get("created_at") or "")[:10]) if d]
     label = f" ({', '.join(details)})" if details else ""
-    return f"- [{item.get('id')}]{label} {content}"
+    head = f"- [{item.get('id')}]{label} "
+    cut = bool(item.get("truncated"))
+    if max_chars is not None and len(head) + len(content) + cut * len(_FETCH_THE_REST) > max_chars:
+        content = content[: max(max_chars - len(head) - len(_FETCH_THE_REST), 0)].rstrip()
+        cut = True
+    return head + content + (_FETCH_THE_REST if cut else "")
 
 
 def _describe_window(session_id: str, messages: Sequence[object]) -> str:

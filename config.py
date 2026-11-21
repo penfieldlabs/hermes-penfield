@@ -30,6 +30,7 @@ from pathlib import Path
 
 from .constants import API_PREFIX, DEV_HOSTS, PROD_HOSTS
 from .exceptions import ConfigError
+from .transport import is_safe_address
 
 logger = logging.getLogger("penfield.config")
 
@@ -136,6 +137,27 @@ def default_api_base(env: Environment) -> str:
     return f"https://{h['api']}{API_PREFIX}"
 
 
+def _read_saved(hermes_home: str | Path) -> dict[str, object]:
+    """Return the settings saved in ``penfield/config.json``.
+
+    A file that is missing is the same as an empty one. So is a file that
+    cannot be used (unreadable, not JSON, not a JSON object), with a warning:
+    a damaged settings file must not take the memory provider down.
+    """
+    path = Path(hermes_home) / "penfield" / "config.json"  # reading creates nothing
+    if not path.exists():
+        return {}
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:  # ValueError: not JSON, or not UTF-8
+        logger.warning("ignoring penfield/config.json: it could not be read (%s)", exc)
+        return {}
+    if not isinstance(saved, dict):
+        logger.warning("ignoring penfield/config.json: it does not hold a JSON object")
+        return {}
+    return saved
+
+
 def _penfield_dir(hermes_home: str | Path) -> Path:
     """Return ``{hermes_home}/penfield``, creating it if possible."""
     base = Path(hermes_home)
@@ -193,7 +215,7 @@ class PenfieldConfig:
 
         * environment from ``env`` arg -> ``PENFIELD_ENV`` -> saved config -> prod
         * ``PENFIELD_URL`` (or ``api_url_override``) overrides the derived host
-        * api key from arg -> ``PENFIELD_API_KEY`` -> saved config
+        * api key from arg -> ``PENFIELD_API_KEY``
 
         Args:
             hermes_home: Hermes home dir holding ``penfield/config.json``.
@@ -201,26 +223,16 @@ class PenfieldConfig:
             api_key: Explicit API key override (skips env/file lookup).
             api_url_override: Explicit API base URL override.
         """
-        saved: dict[str, object] = {}
-        if hermes_home:
-            cfg_path = _penfield_dir(hermes_home) / "config.json"
-            if cfg_path.exists():
-                try:
-                    saved = json.loads(cfg_path.read_text())
-                except (json.JSONDecodeError, OSError):
-                    saved = {}
-
-        # Environment
-        env_val = (
-            env or read_setting("PENFIELD_ENV") or str(saved.get("penfield_env", DEFAULT_ENV))
-        )
-        environment = resolve_environment(env_val)
-
-        # URL override: explicit arg > env var > saved penfield_url > derived
-        override = (
-            api_url_override or read_setting("PENFIELD_URL") or str(saved.get("penfield_url", ""))
-        )
-
+        saved = _read_saved(hermes_home) if hermes_home else {}
+        env_val = env or read_setting("PENFIELD_ENV") or str(saved.get("penfield_env") or "")
+        environment = resolve_environment(env_val or DEFAULT_ENV)
+        saved_url = str(saved.get("penfield_url") or "")
+        override = api_url_override or read_setting("PENFIELD_URL") or saved_url
+        if override and not is_safe_address(override):
+            raise ConfigError(
+                f"PENFIELD_URL must be an https address, got {override!r}. "
+                "Plain http is accepted only for this machine (localhost)."
+            )
         instance = cls(env=environment)
         if override:
             instance.api_base = override.rstrip("/")
@@ -228,12 +240,15 @@ class PenfieldConfig:
             instance.reapply_hosts()
 
         # API key
-        key = (
-            api_key
-            or read_setting("PENFIELD_API_KEY")
-            or (saved.get("api_key") if isinstance(saved.get("api_key"), str) else None)
-        )
-        instance.api_key = key if isinstance(key, str) else None
+        # The key lives in the profile's .env and nowhere else (SECURITY.md).
+        # Whitespace around it is never part of it: a key that comes from a
+        # file usually ends with a line break.
+        instance.api_key = (api_key or read_setting("PENFIELD_API_KEY")).strip() or None
+        if instance.api_key is None and saved.get("api_key"):
+            logger.warning(
+                "penfield/config.json holds an api_key, which is no longer read: put the key "
+                "in the profile's .env as PENFIELD_API_KEY, or run `hermes memory setup penfield`"
+            )
 
         # Behaviour settings from the saved config
         for name, (kind, low, high) in _KNOBS.items():

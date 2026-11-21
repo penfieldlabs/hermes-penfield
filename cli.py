@@ -9,10 +9,12 @@ Hermes calls ``register_cli(plugin_parser)`` with the already-created
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import argparse
 
 #: Characters of each memory that ``hermes penfield search`` prints.
 _CLI_RESULT_CHARS = 200
@@ -29,15 +31,15 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     p = subs.add_parser("status", help="Show connection status")
     p.add_argument("--hermes-home", default="")
 
-    p = subs.add_parser("login", help="Run interactive OAuth device-code login")
+    p = subs.add_parser("login", help="Sign in with your browser")
     p.add_argument("--hermes-home", default="")
     p.add_argument("--client-id", default=None)
 
-    p = subs.add_parser("logout", help="Clear cached tokens")
+    p = subs.add_parser("logout", help="End the browser sign-in and clear cached tokens")
     p.add_argument("--hermes-home", default="")
 
-    p = subs.add_parser("search", help="Quick semantic search from the CLI")
-    p.add_argument("query", nargs=argparse.REMAINDER)
+    p = subs.add_parser("search", help="Search your memories")
+    p.add_argument("query", nargs="*")
     p.add_argument("--hermes-home", default="")
     p.add_argument("--limit", type=int, default=10)
 
@@ -49,24 +51,24 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(func=penfield_command)
 
 
+_COMMANDS = ("status", "login", "logout", "search", "stats", "version")
+
+
 def penfield_command(args: argparse.Namespace) -> None:
     """Dispatch handler for ``hermes penfield <subcommand>``."""
+    from .exceptions import ConfigError
+
     cmd = getattr(args, "penfield_command", None)
-    if cmd == "status":
-        sys.exit(cmd_status(args))
-    elif cmd == "login":
-        sys.exit(cmd_login(args))
-    elif cmd == "logout":
-        sys.exit(cmd_logout(args))
-    elif cmd == "search":
-        sys.exit(cmd_search(args))
-    elif cmd == "stats":
-        sys.exit(cmd_stats(args))
-    elif cmd == "version":
-        sys.exit(cmd_version(args))
-    else:
+    if cmd not in _COMMANDS:
         print(f"unknown penfield command: {cmd}", file=sys.stderr)
         sys.exit(2)
+    try:
+        code = globals()[f"cmd_{cmd}"](args)
+    except ConfigError as exc:
+        # A setting the plugin cannot work with; no command gets further.
+        print(f"error: {exc}", file=sys.stderr)
+        code = 2
+    sys.exit(code)
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +104,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     if cfg.api_key:
         credentials = "API key"
     elif client.is_authenticated():
-        credentials = "saved login"
+        credentials = "browser sign-in"
     else:
         credentials = "none"
     print(f"penfield {VERSION}")
@@ -120,7 +122,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"connection: failed ({exc})")
     else:
         print("connection: ok")
-        print(f"memory count: {stats.get('total_memories', '?')}")
+        print(f"access: {client.access_level()}")
+        count = stats.get("total_memories", "?") if isinstance(stats, dict) else "?"
+        print(f"memory count: {count}")
     return 0
 
 
@@ -145,7 +149,12 @@ def cmd_login(args: argparse.Namespace) -> int:
     except AuthError as exc:
         print(f"login failed: {exc}", file=sys.stderr)
         return 1
-    print("login successful; tokens cached.")
+    except KeyboardInterrupt:
+        print("\nlogin cancelled; nothing was saved.", file=sys.stderr)
+        return 130
+    level = auth.access_level()
+    print("Signed in." if level == "unknown" else f"Signed in. This login may {level}.")
+    print("Start a new session to use Penfield.")
     return 0
 
 

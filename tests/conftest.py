@@ -8,7 +8,7 @@ import importlib.util
 import json
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +74,9 @@ class FakeAuth:
     def is_authenticated(self) -> bool:
         return True
 
+    def access_level(self) -> str:
+        return "unknown"
+
 
 @pytest.fixture
 def fake_auth() -> FakeAuth:
@@ -126,14 +129,40 @@ def api_client(api: FakePenfield, fake_auth: FakeAuth) -> PenfieldClient:
 
 
 @pytest.fixture
-def provider(
+def start_provider(
     api: FakePenfield, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> PenfieldMemoryProvider:
-    """A provider initialized the way Hermes does it, logged in to the fake API."""
+) -> Callable[[], PenfieldMemoryProvider]:
+    """Start a provider the way Hermes does it, with an API key for the fake API.
+
+    Starting sends the first requests, the login and the briefing, from a
+    background thread. A test that needs the API to misbehave from the first
+    request arranges that, then calls this.
+    """
+    # Retries stay; the pauses between them are not what these tests are about.
+    monkeypatch.setattr("penfield.client.BACKOFF_BASE", 0.0)
     monkeypatch.setenv("PENFIELD_URL", api.url)
     monkeypatch.setenv("PENFIELD_API_KEY", "tm_pf_test_ak_unit")
-    instance = PenfieldMemoryProvider()
-    instance.initialize("unit-session", hermes_home=str(tmp_path), platform="cli")
+
+    def start() -> PenfieldMemoryProvider:
+        instance = PenfieldMemoryProvider()
+        instance.initialize("unit-session", hermes_home=str(tmp_path), platform="cli")
+        return instance
+
+    return start
+
+
+@pytest.fixture
+def provider(start_provider: Callable[[], PenfieldMemoryProvider]) -> PenfieldMemoryProvider:
+    """A started provider that is logged in to the fake API and holds its briefing.
+
+    Starting has finished its background work, so what a test sees never
+    depends on how far that thread has come.
+    """
+    instance = start_provider()
+    briefing = instance._briefing
+    assert briefing is not None
+    briefing.result(10)
+    assert briefing.problem() == ""
     return instance
 
 

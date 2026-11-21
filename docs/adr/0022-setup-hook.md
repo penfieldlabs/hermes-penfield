@@ -1,7 +1,7 @@
 # ADR-0022: A setup hook for `hermes memory setup penfield`
 
 - **Date:** 2026-11-20
-- **Status:** Accepted. Extends [ADR-0017](0017-settings-through-hermes.md).
+- **Status:** Accepted. Extends [ADR-0017](0017-settings-through-hermes.md). Amended by [ADR-0024](0024-browser-sign-in-first.md).
 
 ## Context
 

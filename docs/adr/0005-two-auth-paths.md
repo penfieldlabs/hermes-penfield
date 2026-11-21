@@ -1,7 +1,7 @@
 # ADR-0005: Two auth paths — API-key exchange and OAuth device flow
 
 - **Date:** 2026-06-29
-- **Status:** Accepted. Extended by [ADR-0023](0023-one-login-at-a-time.md).
+- **Status:** Accepted. Extended by [ADR-0023](0023-one-login-at-a-time.md). Amended by [ADR-0024](0024-browser-sign-in-first.md) and [ADR-0025](0025-a-login-ends-when-the-server-says-so.md).
 
 ## Context
 

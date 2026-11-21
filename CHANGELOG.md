@@ -6,10 +6,107 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-21
+
+Browser sign-in becomes the first way to connect, and the sign-in and
+the HTTP layer are made to survive servers and networks that misbehave.
+
+### Upgrading from 0.3.0
+Most profiles need nothing. These do:
+- A `PENFIELD_URL` that starts with `http://` and does not point at this
+  machine is refused. Use the `https` address.
+- A browser sign-in made while `PENFIELD_URL` was set is not used after
+  the upgrade, because 0.3.0 did not record where a sign-in was made.
+  Run `hermes memory setup penfield` to sign in again.
+- An API key stored as `api_key` in `penfield/config.json` is no longer
+  read, and the log says so. Put the key in the profile's `.env` as
+  `PENFIELD_API_KEY`, or run `hermes memory setup penfield` and enter it
+  there.
+- If the address in `PENFIELD_URL` answers with a redirect, set it to
+  the address the redirect names.
+
+### Added
+- `hermes memory setup penfield` offers a browser sign-in first: press
+  Enter, approve the code in a browser, and the profile is connected. An
+  API key is the second choice. A profile that is already signed in can
+  keep its sign-in or sign in again. The command first asks Penfield
+  whether that sign-in still works, and offers to sign in again when it
+  has run out or was revoked.
+- The setup command works under `plugins.isolation: host`, where it
+  talks through the terminal the command was typed in. Profiles with
+  host isolation can now sign in with a browser.
+- `hermes memory status` and `hermes penfield status` say what the login
+  in use may do: read only, read and write, or read, write and delete.
+- A tool call Penfield refuses for lack of permission tells the agent
+  what its login may do.
+- A setting the plugin cannot use (an unknown `PENFIELD_ENV`, for one)
+  is named in the log, in what the agent is told, in every tool error
+  and in the status commands, instead of "Penfield is not initialized".
+
 ### Changed
-- README: browser sign-in (`hermes penfield login`) is the recommended way
-  to connect. An API key is the alternative, and the way to limit what
-  the agent may do.
+- README: browser sign-in is the recommended way to connect. An API key
+  is the alternative, and the way to limit what the agent may do.
+- A browser sign-in asks Penfield for read, write and delete access, so
+  that every tool works. A sign-in made earlier keeps what it was given
+  until you sign in again.
+- `PENFIELD_URL` must be an `https` address. Plain `http` is accepted for
+  `localhost` only.
+- Redirects are not followed. Every request carries a login, and a
+  redirect would have sent it on to another address.
+- Cached tokens are used only with the API address that issued them. A
+  profile switched to another address with `PENFIELD_ENV` or
+  `PENFIELD_URL` signs in again there; before, its saved tokens were
+  sent to the new address first.
+- Tool arguments of the wrong kind are refused by name ("limit must be a
+  whole number"). A number or a list of tags written as text is taken as
+  meant.
+- An `api_key` entry in `penfield/config.json` is no longer read. The
+  key belongs in the profile's `.env`, where Hermes puts it.
+- Signing in and renewing a token give up after 8 seconds per attempt
+  instead of 15.
+- Signing in again, with the setup command or `hermes penfield login`,
+  revokes the earlier sign-in at Penfield once the new one is stored.
+- The setup command ends a saved browser sign-in when the API key it
+  stores was accepted by Penfield. With a key that could not be checked,
+  the sign-in stays.
+
+### Fixed
+- One bad answer from the auth server (a 5xx or a 429) while a browser
+  sign-in renewed its token no longer disconnects the profile until
+  Hermes is restarted. A sign-in ends only when Penfield says it is no
+  longer valid.
+- A saved sign-in that has run out or was revoked says so, and says to
+  sign in again, instead of "no credentials available". Sessions that
+  are already running use the new sign-in from their next request.
+- An API key that ends with a line break, as a key read from a file
+  often does, made every request fail inside the HTTP library with an
+  error that quoted the key, and a tool call passed that error on to
+  the agent. Whitespace around a key is now dropped. A key with any
+  other character that cannot be part of one is refused with a message
+  that names the character and never the key, and an error about a
+  request that could not be sent no longer quotes its headers.
+- When several Hermes processes share a profile, one no longer renews
+  with a refresh token another has already used.
+- An answer without a refresh token, which the API may give to a key
+  exchange, is handled. The text `None` was stored and sent as a refresh
+  token before.
+- `hermes penfield login` keeps waiting when the auth server stumbles
+  while you are in the browser, says so when the server keeps failing,
+  and names the failure if the code runs out. Ctrl-C ends it with a
+  message instead of a traceback.
+- Answers that are not what the plugin expects (a web page from a
+  captive portal, a body cut off half way, an error that is not JSON)
+  are reported as Penfield errors. They surfaced as Python errors such
+  as "'NoneType' object has no attribute 'get'" before.
+- A `penfield/config.json` or `penfield/tokens.json` that is damaged no
+  longer stops the provider. The file is ignored, with a warning.
+- Recalled context is no longer cut in the middle of a memory when it
+  reaches `max_prefetch_chars`, and the recall indicator counts the
+  memories that were shown.
+- `hermes penfield search words --limit 3` takes `--limit` as the option
+  it is. It was read as part of the query.
+- The `hermes penfield` commands report a setting they cannot use as an
+  error message instead of a traceback.
 
 ## [0.3.0] - 2026-11-20
 
@@ -153,7 +250,8 @@ Initial release. Self-contained Hermes Agent memory provider for Penfield.
 - Environment switching via `PENFIELD_ENV` (prod/dev)
 - Auto-awakening: persona and persistent context load on every session
 
-[Unreleased]: https://github.com/penfieldlabs/hermes-penfield/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/penfieldlabs/hermes-penfield/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.1
 [0.3.0]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.0
 [0.2.0]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.2.0
 [0.1.0]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.1.0

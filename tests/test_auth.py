@@ -12,6 +12,7 @@ import urllib.parse
 from typing import Any, ClassVar
 
 import pytest
+from penfield import transport
 from penfield.auth import PenfieldAuth, TokenSet
 from penfield.config import Environment, PenfieldConfig
 from penfield.exceptions import AuthError
@@ -76,7 +77,7 @@ class TestApiKeyExchange:
             captured["auth"] = req.headers.get("Authorization", "")
             return _Resp(payload)
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         cfg = _config()
         auth = PenfieldAuth(cfg, tmp_path)
         ts = auth.authenticate()
@@ -102,7 +103,7 @@ class TestApiKeyExchange:
             calls["n"] += 1
             return _Resp(b"{}")
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         cfg = _config()
         # Pre-seed a valid token.
         auth = PenfieldAuth(
@@ -137,7 +138,7 @@ class TestRefresh:
             ).encode()
             return _Resp(payload)
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         cfg = _config()
         auth = PenfieldAuth(
             cfg,
@@ -209,23 +210,27 @@ class TestDeviceFlow:
                 raise item
             return _Resp(json.dumps(item).encode())
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         cfg = _config()
         auth = PenfieldAuth(cfg, tmp_path, tokens=None)
         ts = auth.device_code_flow(client_id="CID", poll_interval_override=0)
         assert ts.access_token == "AT"
 
 
-def _oauth_refusal(code: str) -> urllib.error.HTTPError:
+def _http_error(status: int, body: bytes = b"") -> urllib.error.HTTPError:
     import http.client
 
     return urllib.error.HTTPError(
         url="https://auth-dev/token",
-        code=400,
-        msg=code,
+        code=status,
+        msg=str(status),
         hdrs=http.client.HTTPMessage(),
-        fp=io.BytesIO(json.dumps({"error": code}).encode()),
+        fp=io.BytesIO(body),
     )
+
+
+def _oauth_refusal(code: str) -> urllib.error.HTTPError:
+    return _http_error(400, json.dumps({"error": code}).encode())
 
 
 class TestDeviceFlowFailures:
@@ -256,7 +261,7 @@ class TestDeviceFlowFailures:
                 raise item
             return _Resp(json.dumps(item).encode())
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         PenfieldAuth(_config(), tmp_path, tokens=None).device_code_flow(
             client_id="CID", poll_interval_override=0
         )
@@ -267,6 +272,31 @@ class TestDeviceFlowFailures:
     ) -> None:
         with pytest.raises(AuthError, match="expired before it was approved"):
             self._login(tmp_path, monkeypatch, refusal)
+
+    def test_a_server_that_fails_until_the_code_runs_out_is_named(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The code may have been approved; "it expired" alone would mislead."""
+        answers: list[Any] = [self.DISCOVERY, {**self.DEVICE, "expires_in": 0.2}]
+
+        def fake_urlopen(req: urllib.request.Request, timeout: float = 0) -> _Resp:
+            if answers:
+                return _Resp(json.dumps(answers.pop(0)).encode())
+            raise _http_error(500)
+
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
+        said: list[str] = []
+
+        with pytest.raises(AuthError) as caught:
+            PenfieldAuth(_config(), tmp_path, tokens=None).device_code_flow(
+                client_id="CID", poll_interval_override=0.01, say=said.append
+            )
+
+        assert str(caught.value) == (
+            "the code ran out while the sign-in server was not answering: "
+            "auth server error (500); run the login again"
+        )
+        assert sum("not answering" in line for line in said) == 1
 
     def test_a_refused_sign_in_says_so(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
@@ -323,7 +353,7 @@ class TestLogout:
             sent.append((req.full_url, urllib.parse.parse_qs((req.data or b"").decode())))
             return _Resp(b'{"status":"revoked"}')
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         auth = self._signed_in(tmp_path, "oauth")
 
         assert auth.logout() is True
@@ -340,7 +370,7 @@ class TestLogout:
         def fake_urlopen(req: urllib.request.Request, timeout: float = 0) -> _Resp:
             raise urllib.error.URLError("no route")
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         auth = self._signed_in(tmp_path, "oauth")
 
         assert auth.logout() is False
@@ -352,7 +382,7 @@ class TestLogout:
         def fake_urlopen(req: urllib.request.Request, timeout: float = 0) -> _Resp:
             raise AssertionError("no request expected")
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         auth = self._signed_in(tmp_path, "api_key")
 
         assert auth.logout() is False
@@ -388,7 +418,7 @@ class TestOAuthRefreshRouting:
             ).encode()
             return _Resp(payload)
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         cfg = _config()
         auth = PenfieldAuth(
             cfg,
@@ -445,7 +475,7 @@ class TestOAuthRefreshRouting:
             ).encode()
             return _Resp(payload)
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         cfg = _config()
         auth = PenfieldAuth(
             cfg,
@@ -485,7 +515,7 @@ class TestOAuthRefreshRouting:
                 client_id=None,  # missing
             ),
         )
-        with pytest.raises(TokenExpiredError, match="client_id"):
+        with pytest.raises(TokenExpiredError, match="does not name its client"):
             auth._refresh_oauth("RT1")
 
     def test_tokenset_roundtrip_preserves_source_and_client_id(self) -> None:

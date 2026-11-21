@@ -293,16 +293,24 @@ class TestStatus:
         assert status["auto_recall"].startswith("on")
         assert status["mirror_builtin_memory"] == "off"
 
+    def test_names_a_key_that_has_not_been_used_yet(
+        self, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PENFIELD_API_KEY", "tm_pf_test_ak_unit")
+        status = PenfieldMemoryProvider().get_status_config({})
+        assert status["credentials"] == "API key"
+        assert "tm_pf_test_ak_unit" not in json.dumps(status)
+
     def test_names_the_credential_in_use_without_showing_it(
         self, provider: PenfieldMemoryProvider
     ) -> None:
         status = provider.get_status_config({})
-        assert status["credentials"] == "API key"
+        assert status["credentials"] == "API key (may read, write and delete)"
         assert "tm_pf_test_ak_unit" not in json.dumps(status)
 
-    def test_reports_a_saved_login(self, hermes_home: Path) -> None:
+    def test_reports_a_browser_sign_in(self, hermes_home: Path) -> None:
         _save_tokens(hermes_home, source="oauth")
-        assert PenfieldMemoryProvider().get_status_config({})["credentials"] == "saved login"
+        assert PenfieldMemoryProvider().get_status_config({})["credentials"] == "browser sign-in"
 
     def test_tokens_left_by_a_removed_api_key_are_not_a_login(self, hermes_home: Path) -> None:
         _save_tokens(hermes_home, source="api_key")

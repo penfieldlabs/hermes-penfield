@@ -36,7 +36,13 @@ the API key as the credentials in use.
   even when a key had set it aside, and says when an API key is still in
   use.
 - `hermes memory setup penfield` revokes a saved browser sign-in when it
-  stores a key, since the key replaces it.
+  stores a key Penfield has accepted, since the key replaces it. A key
+  that could not be checked may turn out not to work, so the sign-in is
+  left in place. The command says how to end it: run it again when
+  Penfield can be reached and enter the key again. That works in the
+  plugin host too, where `hermes penfield logout` does not exist, and it
+  revokes the sign-in, which a logout while Penfield is unreachable
+  cannot do.
 
 ## Consequences
 

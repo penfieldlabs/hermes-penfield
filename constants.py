@@ -84,6 +84,10 @@ BACKOFF_FACTOR = 2.0
 # request plus at most two retries.
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 15.0
+# Signing in and renewing a token answer in well under a second. A tool call
+# may go through this step up to three times when the auth server hangs, so
+# its own limit is shorter than a request's.
+AUTH_TIMEOUT = 8.0
 
 # Three hooks run while the user waits, and Hermes puts no time limit on
 # them. Each does its work on a background thread and stops waiting at a
@@ -106,6 +110,11 @@ SETUP_CHECK_TIMEOUT = 10.0
 #: Where a user creates an API key.
 API_KEYS_URL = "https://portal.penfield.app/settings/api-keys"
 
+#: What a browser sign-in asks Penfield for. ``delete`` because two of the
+#: tools delete (``penfield_disconnect``, ``penfield_delete_artifact``), and
+#: ``offline_access`` so that the sign-in can renew itself.
+SIGN_IN_SCOPE = "read write delete offline_access"
+
 # Requests that create something new on every call. Repeating one after a
 # timeout or a 5xx can store the same thing twice, so these are never
 # retried on an ambiguous failure. Every other endpoint is a read or an
@@ -117,7 +126,7 @@ REFRESH_SKEW_SECONDS = 300.0
 
 # The plugin version. plugin.yaml carries the same value for Hermes; a test
 # keeps the two in step.
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 USER_AGENT = f"hermes-penfield/{VERSION}"
 
 # ---------------------------------------------------------------------------

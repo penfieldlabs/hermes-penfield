@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,10 @@ def run(
     capsys: pytest.CaptureFixture[str],
 ):
     """Run a CLI command the way Hermes does and return (exit code, stdout, stderr)."""
+    # Retries stay; the pauses between them and the wait for another process
+    # to rotate a token are not what these tests are about.
+    monkeypatch.setattr("penfield.client.BACKOFF_BASE", 0.0)
+    monkeypatch.setattr("penfield.auth._ROTATION_WAIT_SECONDS", 0.05)
     monkeypatch.setenv("PENFIELD_URL", api.url)
     monkeypatch.setenv("PENFIELD_API_KEY", "tm_pf_test_ak_cli")
 
@@ -84,7 +89,7 @@ class TestStatus:
         _, out, _ = run("status")
         assert "credentials: none" in out
         assert "connection: not signed in" in out
-        assert "hermes penfield login" in out
+        assert "hermes memory setup penfield" in out
 
     def test_a_saved_login_that_no_longer_works_is_not_reported_as_fine(
         self, run, api: FakePenfield, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
@@ -94,7 +99,14 @@ class TestStatus:
 
         cache = hermes_home / "penfield" / "tokens.json"
         cache.parent.mkdir(parents=True)
-        signed_in = TokenSet("AT", "RT", expires_at=4102444800.0, source="oauth", client_id="CID")
+        signed_in = TokenSet(
+            "AT",
+            "RT",
+            expires_at=4102444800.0,
+            source="oauth",
+            client_id="CID",
+            api_base=os.environ["PENFIELD_URL"],
+        )
         cache.write_text(json.dumps(signed_in.to_dict()), encoding="utf-8")
         monkeypatch.delenv("PENFIELD_API_KEY")
 
@@ -105,9 +117,48 @@ class TestStatus:
 
         _, out, _ = run("status")
 
-        assert "credentials: saved login" in out
+        assert "credentials: browser sign-in" in out
         assert "connection: not signed in" in out
         assert "connection: ok" not in out
+
+    @pytest.mark.parametrize(
+        ("scopes", "level"),
+        [
+            ({"read"}, "read only"),
+            ({"read", "write"}, "read and write"),
+            ({"read", "write", "delete"}, "read, write and delete"),
+        ],
+    )
+    def test_says_what_the_api_key_may_do(
+        self, run, api: FakePenfield, scopes: set[str], level: str
+    ) -> None:
+        api.api_key_scopes["tm_pf_test_ak_cli"] = frozenset(scopes)
+        _, out, _ = run("status")
+        assert "credentials: API key" in out
+        assert f"access: {level}\n" in out
+
+    def test_says_what_a_browser_sign_in_may_do(
+        self, run, api: FakePenfield, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("PENFIELD_API_KEY")
+        api.approve_sign_ins = True
+        assert run("login")[0] == 0
+
+        _, out, _ = run("status")
+
+        assert "credentials: browser sign-in" in out
+        assert "access: read, write and delete\n" in out
+        assert "connection: ok" in out
+
+    @pytest.mark.parametrize("command", ["status", "stats", "login", "logout", "search"])
+    def test_an_unusable_setting_is_an_error_message_not_a_traceback(
+        self, run, monkeypatch: pytest.MonkeyPatch, command: str
+    ) -> None:
+        monkeypatch.setenv("PENFIELD_ENV", "staging")
+        code, out, err = run(command, *(["anything"] if command == "search" else []))
+        assert code == 2
+        assert "unknown PENFIELD_ENV 'staging'" in err
+        assert "Traceback" not in out + err
 
     def test_removing_the_api_key_disconnects_the_profile(
         self, run, monkeypatch: pytest.MonkeyPatch
@@ -141,6 +192,12 @@ class TestSearch:
             api.seed_memory(f"launch note {n}")
         _, out, _ = run("search", "--limit", "2", "launch")
         assert len(out.strip().splitlines()) == 2
+
+    def test_an_option_after_the_query_is_still_an_option(self, run, api: FakePenfield) -> None:
+        run("search", "launch", "checklist", "--limit", "3")
+        sent = api.calls("POST", "/search/hybrid")[-1].body
+        assert sent["query"] == "launch checklist"
+        assert sent["limit"] == 3
 
     def test_a_query_is_required(self, run) -> None:
         code, _, err = run("search")
@@ -255,8 +312,40 @@ class TestLoginLogout:
         )
         code, out, _ = run("login", "--client-id", "client-123")
         assert code == 0
-        assert "login successful" in out
+        assert "Signed in" in out
         assert seen == {"client_id": "client-123"}
+
+    def test_login_signs_in_through_the_browser(
+        self, run, api: FakePenfield, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("PENFIELD_API_KEY")
+        api.approve_sign_ins = True
+
+        code, out, _ = run("login")
+
+        assert code == 0
+        assert f"{api.root}/device?user_code=TEST-0001" in out
+        assert "Signed in. This login may read, write and delete." in out
+        assert "Start a new session" in out
+        saved = json.loads((hermes_home / "penfield" / "tokens.json").read_text())
+        assert saved["source"] == "oauth"
+
+    def test_an_interrupted_login_is_a_message_not_a_traceback(
+        self, run, hermes_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from penfield.auth import PenfieldAuth
+
+        def interrupted(self: PenfieldAuth, **_kwargs: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.delenv("PENFIELD_API_KEY")
+        monkeypatch.setattr(PenfieldAuth, "device_code_flow", interrupted)
+
+        code, _, err = run("login")
+
+        assert code == 130
+        assert "login cancelled" in err
+        assert not (hermes_home / "penfield" / "tokens.json").exists()
 
 
 class TestDispatch:

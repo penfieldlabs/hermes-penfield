@@ -13,11 +13,12 @@ modules sit at the top level and there is no package to build.
 | ---- | -------- |
 | `provider.py` | The Hermes `MemoryProvider`: session hooks, auto-recall, checkpoints. |
 | `tools.py` | The `penfield_*` tool schemas and their handlers. |
-| `client.py`, `auth.py` | HTTP client and token handling. Standard library only. |
+| `client.py`, `auth.py` | API client, sign-in and token handling. Standard library only. |
+| `transport.py` | The one place that sends a request. It never follows a redirect. |
 | `config.py`, `constants.py` | Settings, hosts, endpoints, limits. |
 | `mirror.py` | Optional copy of Hermes's built-in memory writes. |
 | `cli.py` | `hermes penfield ...` commands. |
-| `setup_wizard.py` | What `hermes memory setup penfield` asks and saves. |
+| `setup_wizard.py` | What `hermes memory setup penfield` does: browser sign-in or API key. |
 | `plugin.yaml` | The manifest Hermes reads. |
 | `tests/` | Unit tests, which run against a local fake of the Penfield API. |
 | `tests/hermes/` | Integration tests, which run the plugin inside a real Hermes Agent. |
@@ -48,9 +49,17 @@ make check        # ruff, mypy and the unit tests with the coverage gate
 ```
 
 The unit tests need no network and no Hermes install. They talk to
-`tests/support/fake_penfield.py`, an in-memory Penfield API served on
-loopback, so the real HTTP client, token handling and error paths are
-exercised.
+`tests/support/fake_penfield.py`, an in-memory Penfield API and auth
+server on loopback, so the real HTTP client, the browser sign-in, token
+handling and error paths are exercised. `tests/support/raw_server.py`
+answers with whatever a test tells it to (half a body, a web page, a
+redirect) for the cases a well-behaved fake cannot produce.
+
+A provider logs in and loads its briefing on a background thread as soon
+as it starts. The `provider` fixture hands a test a provider that has
+finished both, so the outcome never depends on timing. A test that needs
+the API to fail from the first request arranges the failure first, then
+starts the provider itself with the `start_provider` fixture.
 
 ### Integration tests inside Hermes Agent
 

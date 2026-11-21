@@ -10,6 +10,7 @@ few parameters the REST API cannot serve.
 from __future__ import annotations
 
 import json
+import math
 import re as _re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -410,6 +411,9 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 TOOL_NAMES = {t["name"] for t in PENFIELD_TOOL_SCHEMAS}
+_PARAMETERS: dict[str, dict[str, Any]] = {
+    t["name"]: t.get("parameters", {}) for t in PENFIELD_TOOL_SCHEMAS
+}
 
 
 # ---------------------------------------------------------------------------
@@ -439,18 +443,81 @@ def dispatch(client: PenfieldClient, tool_name: str, args: dict[str, Any]) -> st
         raise ValueError(f"unknown tool {tool_name!r}")
     if not isinstance(args, dict):
         raise ValueError(f"{tool_name}: arguments must be a JSON object")
-    required: list[str] = []
-    for schema in PENFIELD_TOOL_SCHEMAS:
-        if schema["name"] == tool_name:
-            required = list(schema.get("parameters", {}).get("required", []))
-            break
+    parameters = _PARAMETERS[tool_name]
     # Models send "" or null for optionals they mean to omit; drop those.
     sanitized = {k: v for k, v in args.items() if v not in ("", [], {}, None)}
-    for key in required:
+    for key in parameters.get("required", []):
         if key not in sanitized:
             raise ValueError(f"{tool_name}: missing required argument {key!r}")
+    properties = parameters.get("properties", {})
+    for key, value in sanitized.items():
+        if key in properties:
+            sanitized[key] = _as_declared(key, value, str(properties[key].get("type")))
     result = _HANDLERS[tool_name](client, sanitized)
     return json.dumps(result, default=_json_default)
+
+
+def _as_declared(name: str, value: Any, kind: str) -> Any:
+    """Return ``value`` as the kind the tool's schema declares for ``name``.
+
+    A value that is plainly meant (``"3"`` for a number, ``"a, b"`` for a
+    list of tags) is taken as such. Anything else is refused by name, so the
+    model reads which argument to correct instead of a Python error.
+    """
+    if kind == "string":
+        if isinstance(value, str) and _is_text(value):
+            return value
+        raise ValueError(f"{name} must be text")
+    if kind == "integer":
+        number = _as_number(value)
+        if number is None or number != int(number):
+            raise ValueError(f"{name} must be a whole number")
+        return int(number)
+    if kind == "number":
+        number = _as_number(value)
+        if number is None:
+            raise ValueError(f"{name} must be a number")
+        return number
+    if kind == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+            return value.strip().lower() == "true"
+        raise ValueError(f"{name} must be true or false")
+    if kind == "array":
+        if isinstance(value, str):
+            value = [part.strip() for part in value.split(",") if part.strip()]
+        if isinstance(value, list) and all(isinstance(i, str) and _is_text(i) for i in value):
+            return value
+        raise ValueError(f"{name} must be a list of text")
+    return value
+
+
+def _as_number(value: Any) -> float | None:
+    """Return ``value`` as a number, or ``None`` if it is not one.
+
+    Infinity and not-a-number are no use to any tool and do not survive
+    the trip to the API as JSON; they count as not a number.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    if isinstance(value, int) or (isinstance(value, float) and math.isfinite(value)):
+        return value
+    return None
+
+
+def _is_text(value: str) -> bool:
+    """False for a string that cannot be sent, such as half a surrogate pair."""
+    try:
+        value.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _json_default(obj: object) -> str:

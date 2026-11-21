@@ -1,7 +1,7 @@
 # ADR-0013: Never stall the agent
 
 - **Date:** 2026-11-19
-- **Status:** Accepted. Amends [ADR-0002](0002-stdlib-only-http.md).
+- **Status:** Accepted. Amends [ADR-0002](0002-stdlib-only-http.md). Amended by [ADR-0025](0025-a-login-ends-when-the-server-says-so.md), extended by [ADR-0027](0027-say-why-penfield-is-off.md).
 
 ## Context
 

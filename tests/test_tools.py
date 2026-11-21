@@ -342,3 +342,89 @@ class TestListArtifacts:
 
         assert result["folders"] == ["meetings"]
         assert [f["name"] for f in result["files"]] == ["Meeting-2026.md"]
+
+
+class TestArgumentsOfTheWrongKind:
+    """A model that sends the wrong kind of value is told what the tool takes."""
+
+    @pytest.mark.parametrize(
+        ("tool", "args", "said"),
+        [
+            ("penfield_recall", {"query": "q", "limit": "many"}, "limit must be a whole number"),
+            ("penfield_recall", {"query": "q", "limit": [3]}, "limit must be a whole number"),
+            ("penfield_recall", {"query": "q", "limit": 2.5}, "limit must be a whole number"),
+            ("penfield_search", {"query": "q", "limit": "ten"}, "limit must be a whole number"),
+            ("penfield_list_contexts", {"limit": "x"}, "limit must be a whole number"),
+            ("penfield_list_contexts", {"offset": "x"}, "offset must be a whole number"),
+            (
+                "penfield_restore_context",
+                {"name": "n", "limit": "x"},
+                "limit must be a whole number",
+            ),
+            ("penfield_recall", {"query": "q", "limit": True}, "limit must be a whole number"),
+            ("penfield_recall", {"query": "q", "limit": "inf"}, "limit must be a whole number"),
+            ("penfield_recall", {"query": "q", "limit": "-inf"}, "limit must be a whole number"),
+            ("penfield_recall", {"query": "q", "limit": "nan"}, "limit must be a whole number"),
+            ("penfield_recall", {"query": "q", "limit": 1e999}, "limit must be a whole number"),
+            ("penfield_recall", {"query": "q", "limit": "1e999"}, "limit must be a whole number"),
+            (
+                "penfield_store",
+                {"content": "c", "importance": "inf"},
+                "importance must be a number",
+            ),
+            (
+                "penfield_store",
+                {"content": "c", "importance": float("nan")},
+                "importance must be a number",
+            ),
+            ("penfield_recall", {"query": "q", "tags": ["a", 1]}, "tags must be a list of text"),
+            ("penfield_store", {"content": "c", "tags": {"a": 1}}, "tags must be a list of text"),
+            (
+                "penfield_store",
+                {"content": "c", "importance": "high"},
+                "importance must be a number",
+            ),
+            (
+                "penfield_reflect",
+                {"include_documents": "maybe"},
+                "include_documents must be true or false",
+            ),
+            ("penfield_store", {"content": {"k": "v"}}, "content must be text"),
+            ("penfield_fetch", {"id": ["x"]}, "id must be text"),
+            ("penfield_fetch", {"id": "\ud800"}, "id must be text"),
+            ("penfield_save_artifact", {"path": 5, "content": "x"}, "path must be text"),
+        ],
+    )
+    def test_the_error_names_the_argument(
+        self, tool: str, args: dict[str, Any], said: str
+    ) -> None:
+        client = _RecordingClient()
+        with pytest.raises(ValueError, match=said):
+            dispatch(client, tool, args)  # type: ignore[arg-type]
+        assert client.calls == [], "nothing is sent"
+
+    @pytest.mark.parametrize("limit", [3, "3", " 3 ", 3.0])
+    def test_a_number_written_as_text_is_taken_as_the_number(self, limit: object) -> None:
+        client = _RecordingClient()
+        dispatch(client, "penfield_recall", {"query": "q", "limit": limit})  # type: ignore[arg-type]
+        sent = client.calls[0][1]["limit"]
+        assert sent == 3
+        assert isinstance(sent, int)
+
+    def test_tags_written_as_one_text_are_taken_as_the_list(self) -> None:
+        client = _RecordingClient()
+        dispatch(client, "penfield_store", {"content": "c", "tags": "launch, dns"})  # type: ignore[arg-type]
+        assert client.calls[0][1]["tags"] == ["launch", "dns"]
+
+    @pytest.mark.parametrize(("typed", "meant"), [("true", True), ("False", False), (True, True)])
+    def test_true_and_false_written_as_text_are_taken_as_such(
+        self, typed: object, meant: bool
+    ) -> None:
+        client = _RecordingClient()
+        dispatch(client, "penfield_reflect", {"include_documents": typed})  # type: ignore[arg-type]
+        assert client.calls[0][1]["include_documents"] is meant
+
+    def test_an_argument_the_tool_does_not_know_is_ignored(self) -> None:
+        client = _RecordingClient()
+        dispatch(client, "penfield_recall", {"query": "q", "verbose": {"x": 1}})  # type: ignore[arg-type]
+        assert client.calls[0][1] == {"query": "q"}

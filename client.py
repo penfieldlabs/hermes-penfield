@@ -4,9 +4,9 @@
 
 Design constraints (see ADR-0002):
 
-* **No third-party HTTP deps.** ``urllib.request`` / ``urllib.parse`` only,
-  so the plugin installs cleanly into any Python 3.10+ environment without
-  dependency conflicts. This is a hard requirement from the v1.0 spec.
+* **No third-party HTTP deps.** The standard library only, so the plugin
+  installs into any Python 3.11+ environment without dependency conflicts.
+  Requests go out through :mod:`transport`, which never follows a redirect.
 * **Client-side rate limiting.** Sliding 60s window at the documented RPM.
 * **Bounded retries.** 429 is always retried. 5xx and transport failures are
   retried only when repeating the request cannot create a duplicate. Other
@@ -16,6 +16,9 @@ Design constraints (see ADR-0002):
 * **Envelope-aware.** Every successful API call returns
   ``{"status": "success", "data": ..., "meta": ...}``; this class unwraps
   ``data`` and raises typed errors on failure.
+* **One family of errors.** Whatever arrives instead of the expected
+  answer (a web page, half a body, a redirect) is raised as an
+  :class:`~penfield.exceptions.APIError`.
 """
 
 from __future__ import annotations
@@ -24,11 +27,11 @@ import json
 import random
 import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from typing import TYPE_CHECKING, Any
 
+from . import transport
 from .constants import (
     BACKOFF_BASE,
     BACKOFF_FACTOR,
@@ -95,6 +98,10 @@ class PenfieldClient:
     def is_authenticated(self) -> bool:
         """Return whether the underlying auth holds a usable token."""
         return self._auth.is_authenticated()
+
+    def access_level(self) -> str:
+        """Say what the login in use may do, as far as its tokens tell."""
+        return self._auth.access_level()
 
     def _enforce_rate_limit(self) -> None:
         """Block until we are under the RPM cap (sliding 60s window)."""
@@ -173,16 +180,30 @@ class PenfieldClient:
                 delay = min(delay * BACKOFF_FACTOR, BACKOFF_MAX)
                 continue
             req = self._build_request(method, url, body_bytes, header)
+            cause: Exception | None = None
             try:
-                with urllib.request.urlopen(req, timeout=timeout or self._timeout) as resp:
-                    return _unwrap(resp.read())
-            except urllib.error.HTTPError as exc:
-                status = exc.code
-                wait = self._retry_after(exc, delay)
-                error = self._classify_error(status, self._read_error(exc))
-                if status == 401 and not refreshed:
+                answer = transport.send(req, timeout or self._timeout)
+            except transport.NoAnswerError as exc:
+                problem: PenfieldError = APIError(f"transport error: {exc}", status=0)
+                cause, retriable, wait = exc, repeatable, delay
+            else:
+                status = answer.status
+                if 200 <= status < 300:
+                    try:
+                        return _unwrap(answer.body)
+                    except _UnreadableAnswerError as exc:
+                        # Something answered in Penfield's place, or the body
+                        # was damaged on the way. The request may have been
+                        # applied all the same.
+                        problem = APIError(
+                            f"Penfield's answer could not be read ({exc})", status=status
+                        )
+                        cause, retriable, wait = exc, repeatable, delay
+                elif status == 401 and not refreshed:
                     # The token was rejected before the request was processed;
                     # get a fresh one and try once more.
+                    problem = self._classify_error(answer)
+                    wait = self._retry_after(answer, delay)
                     try:
                         self._auth.refresh()
                     except AuthTransportError:
@@ -190,19 +211,18 @@ class PenfieldClient:
                         # again if attempts remain.
                         if retries_left <= 0:
                             raise
+                        retriable = True
                     else:
                         refreshed = True
                         continue
                 else:
+                    problem = self._classify_error(answer)
+                    wait = self._retry_after(answer, delay)
                     # A 429 was refused before it was processed, so it is
                     # always safe to repeat. A 5xx may have been applied.
                     retriable = status == 429 or (status >= 500 and repeatable)
-                    if not retriable or retries_left <= 0:
-                        raise error from exc
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                if not repeatable or retries_left <= 0:
-                    raise APIError(f"transport error: {exc}", status=0) from exc
-                wait = delay
+            if not retriable or retries_left <= 0:
+                raise problem from cause
             retries_left -= 1
             self._sleep(wait)
             delay = min(delay * BACKOFF_FACTOR, BACKOFF_MAX)
@@ -283,26 +303,28 @@ class PenfieldClient:
             headers["Content-Type"] = "application/json"
         return urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
 
-    def _read_error(self, exc: urllib.error.HTTPError) -> str:
-        """Read an error body and release its connection."""
-        try:
-            return exc.read().decode(errors="replace")
-        except OSError:
-            return ""
-        finally:
-            exc.close()
-
-    def _classify_error(self, status: int, detail: str) -> PenfieldError:
-        """Map an HTTP error to a typed :class:`PenfieldError` subclass."""
+    def _classify_error(self, answer: transport.Answer) -> PenfieldError:
+        """Map an answer that is not a success to a :class:`PenfieldError`."""
+        status = answer.status
+        if answer.redirect_target:
+            return APIError(
+                f"unexpected redirect ({status}) to {answer.redirect_target}; not followed",
+                status=status,
+            )
+        detail = answer.body.decode(errors="replace")
         code: str | None = None
         request_id: str | None = None
-        message = detail[:500]
+        message = ""
         try:
-            parsed = json.loads(detail)
-            err = parsed.get("error", {}) if isinstance(parsed, dict) else {}
+            parsed: Any = json.loads(detail)
+            is_json = True
+        except ValueError:
+            parsed, is_json = None, False
+        if isinstance(parsed, dict):
+            err = parsed.get("error")
             if isinstance(err, dict):
                 code = str(err.get("code")) if err.get("code") else None
-                message = str(err.get("message", message))
+                message = str(err.get("message") or "")
                 # A validation error says which field is wrong only here.
                 fields = err.get("field_errors")
                 if isinstance(fields, dict) and fields:
@@ -311,13 +333,18 @@ class PenfieldClient:
                         for name, why in fields.items()
                     )
                     message = f"{message} ({reasons})"
-                request_id = (
-                    str(parsed.get("meta", {}).get("request_id"))
-                    if isinstance(parsed.get("meta"), dict)
-                    else None
-                )
-        except (json.JSONDecodeError, ValueError):
-            pass
+            elif isinstance(err, str):
+                message = err
+            elif isinstance(parsed.get("detail"), str):
+                message = parsed["detail"]
+            meta = parsed.get("meta")
+            if isinstance(meta, dict) and meta.get("request_id"):
+                request_id = str(meta["request_id"])
+        if not message:
+            # Not Penfield's error shape: a proxy, a gateway, a framework default.
+            text = " ".join(detail.split())
+            plain = text and not is_json and not text.startswith("<")
+            message = f"HTTP {status}: {text[:200]}" if plain else f"HTTP {status}"
 
         if status == 404:
             return NotFoundError(message, status=status, code=code, request_id=request_id)
@@ -334,9 +361,9 @@ class PenfieldClient:
         return APIError(message, status=status, code=code, request_id=request_id)
 
     @staticmethod
-    def _retry_after(exc: urllib.error.HTTPError, delay: float) -> float:
+    def _retry_after(answer: transport.Answer, delay: float) -> float:
         """Honor a Retry-After header when present, else backoff + jitter."""
-        header = exc.headers.get("Retry-After") if exc.headers else None
+        header = answer.headers.get("Retry-After")
         if header:
             try:
                 return float(header)
@@ -353,23 +380,37 @@ def _query_value(v: Any) -> str:
     return str(v)
 
 
+class _UnreadableAnswerError(ValueError):
+    """A success status came with a body that is not the API's JSON."""
+
+
 def _unwrap(raw: bytes) -> Any:
     """Parse the success envelope and return ``data``.
 
     A 204 (DELETE) returns an empty body -> return ``None``.
+
+    Raises:
+        _UnreadableAnswerError: If the body is not JSON.
+        APIError: If the envelope reports an error.
     """
     if not raw:
         return None
-    parsed: Any = json.loads(raw.decode())
+    try:
+        parsed: Any = json.loads(raw.decode())
+    except ValueError as exc:  # not JSON, or not text at all
+        raise _UnreadableAnswerError("it is not JSON") from exc
     if isinstance(parsed, dict) and parsed.get("status") == "error":
-        err = parsed.get("error", {})
+        err = parsed.get("error")
+        meta = parsed.get("meta")
+        # Normally an object with a message and a code; tolerate a bare string.
+        details: dict[str, Any] = err if isinstance(err, dict) else {"message": err}
         raise APIError(
-            str(err.get("message", "unknown error")),
+            str(details.get("message") or "unknown error"),
             status=200,  # envelope-level error on a 2xx is rare but possible
-            code=str(err.get("code")) if err.get("code") else None,
+            code=str(details["code"]) if details.get("code") else None,
             request_id=(
-                str(parsed.get("meta", {}).get("request_id"))
-                if isinstance(parsed.get("meta"), dict)
+                str(meta["request_id"])
+                if isinstance(meta, dict) and meta.get("request_id")
                 else None
             ),
         )

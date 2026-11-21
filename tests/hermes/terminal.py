@@ -10,8 +10,8 @@ process.
 Usage: ``python terminal.py <spec.json> <result.json>``. The spec holds
 ``argv``, ``cwd``, ``timeout`` and ``answers``, a list of
 ``[text to wait for, text to type]`` pairs used in order. The result holds
-the exit code, everything the command showed, and how many answers were
-typed.
+the exit code, everything the command showed, how many answers were typed,
+and whether the terminal was left the way it was found.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import re
 import select
 import signal
 import sys
+import termios
 import time
 from pathlib import Path
 
@@ -36,13 +37,28 @@ def _shown(raw: bytes) -> str:
     return _CONTROL.sub("", raw.decode("utf-8", "replace"))
 
 
+def _line_settings(fd: int) -> list[object] | None:
+    """The terminal's settings that decide what Ctrl-C does, or ``None``."""
+    try:
+        settings = termios.tcgetattr(fd)
+    except termios.error:
+        return None
+    return [bool(settings[3] & termios.ISIG), settings[6][termios.VEOL].hex()]
+
+
 def main(argv: list[str]) -> int:
     spec = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
     answers: list[list[str]] = spec["answers"]
     pid, fd = pty.fork()
     if pid == 0:  # the command, with the pseudo-terminal as its terminal
+        # A command typed into a shell starts with Ctrl-C and Ctrl-\ in force.
+        # A test run started in the background has them switched off, and
+        # would pass that on.
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.signal(signal.SIGQUIT, signal.SIG_DFL)
         os.chdir(spec["cwd"])
         os.execvp(spec["argv"][0], spec["argv"])
+    settings_before = _line_settings(fd)
     raw, typed, answered_at = b"", 0, 0
     deadline = time.monotonic() + float(spec["timeout"])
     quiet_since = time.monotonic()
@@ -77,6 +93,7 @@ def main(argv: list[str]) -> int:
         "timed_out": not finished,
         "shown": _shown(raw),
         "typed": typed,
+        "terminal_restored": _line_settings(fd) == settings_before,
     }
     Path(argv[2]).write_text(json.dumps(result), encoding="utf-8")
     return 0

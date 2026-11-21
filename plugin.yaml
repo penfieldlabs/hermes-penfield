@@ -1,5 +1,5 @@
 name: penfield
-version: 0.3.0
+version: 0.3.1
 description: "Penfield persistent memory for Hermes Agent: a cross-session knowledge graph with hybrid search, typed connections and artifact storage."
 # Hermes Agent 0.21.6 is the oldest release the plugin supports. The floor is
 # one patch lower because Hermes reports itself as 0.21.5 when it cannot read

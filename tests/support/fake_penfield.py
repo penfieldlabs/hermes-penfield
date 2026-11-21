@@ -9,11 +9,15 @@ reference at github.com/penfieldlabs/docs.
 
 The fake is deliberately small: enough behaviour for the plugin's request
 paths (auth, memories, hybrid search, relationships, reflect, artifacts,
-awakening) plus fault injection for outage tests.
+awakening) plus fault injection for outage tests. It also plays the auth
+server for a browser sign-in: metadata, client registration, device codes,
+the token endpoint and revocation, with the scopes a login was given
+enforced on every API request.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import socket
@@ -38,6 +42,10 @@ SOURCE_TYPES = frozenset(
 TIME_WINDOWS = ("recent", "today", "week", "month")
 
 DEFAULT_BRIEFING = "=== AWAKENING BRIEFING ===\nYou are a test persona."
+
+#: What a login may be allowed to do, and what each kind of request needs.
+ALL_SCOPES = frozenset({"read", "write", "delete"})
+SCOPES_SUPPORTED = ("read", "write", "delete", "profile", "offline_access")
 
 
 @dataclass
@@ -71,6 +79,22 @@ class FakePenfield:
         self.allow_memory_delete = True
         #: API keys the server refuses, as it does a revoked or mistyped one.
         self.rejected_api_keys: set[str] = set()
+        #: What an API key may do; a key not listed here may do everything.
+        self.api_key_scopes: dict[str, frozenset[str]] = {}
+        #: The live dev API answers a key exchange without a refresh token.
+        self.key_exchange_gives_refresh_token = True
+        #: Browser sign-ins by device code: ``pending``, ``approved`` or ``refused``.
+        self.sign_ins: dict[str, dict[str, Any]] = {}
+        self.clients: dict[str, str] = {}
+        self.device_code_lifetime = 600.0
+        self.device_poll_interval = 0.0
+        #: Decide a sign-in on its first poll, as a person with the page open would.
+        self.approve_sign_ins = False
+        self.refuse_sign_ins = False
+        #: Tokens handed to the revocation endpoint.
+        self.revoked: list[str] = []
+        self._token_scopes: dict[str, frozenset[str]] = {}
+        self._refresh_grants: dict[str, dict[str, Any]] = {}
         self._release = threading.Event()
         #: Refresh tokens that are still valid (rotation invalidates old ones).
         self.valid_refresh_tokens: set[str] = set()
@@ -123,10 +147,34 @@ class FakePenfield:
         self.stop()
 
     @property
+    def root(self) -> str:
+        """Scheme, host and port the fake listens on."""
+        assert self._server is not None, "start() the fake first"
+        return f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    @property
     def url(self) -> str:
         """API base URL, suitable for ``PENFIELD_URL``."""
-        assert self._server is not None, "start() the fake first"
-        return f"http://127.0.0.1:{self._server.server_address[1]}{API_PREFIX}"
+        return f"{self.root}{API_PREFIX}"
+
+    def approve_sign_in(self, device_code: str | None = None) -> None:
+        """Approve a waiting browser sign-in (the newest one by default)."""
+        self._decide_sign_in(device_code, "approved")
+
+    def refuse_sign_in(self, device_code: str | None = None) -> None:
+        """Refuse a waiting browser sign-in (the newest one by default)."""
+        self._decide_sign_in(device_code, "refused")
+
+    def _decide_sign_in(self, device_code: str | None, state: str) -> None:
+        with self._lock:
+            code = device_code or list(self.sign_ins)[-1]
+            self.sign_ins[code]["state"] = state
+
+    def sign_in(self, scope: str = "read write delete offline_access") -> dict[str, Any]:
+        """Return the tokens of a finished browser sign-in, as the token endpoint would."""
+        with self._lock:
+            client_id = self._register({"scope": scope})["client_id"]
+            return {**self._issue_tokens(scope=scope, client_id=client_id), "client_id": client_id}
 
     # ------------------------------------------------------------------
     # Test helpers
@@ -231,7 +279,7 @@ class FakePenfield:
         )
         with self._lock:
             self.requests.append(rec)
-            outage = None if path.startswith("/auth/") else self.outage
+            outage = None if path.startswith(_AUTH_PATHS) else self.outage
         if outage == "hang":
             self._release.wait(timeout=300)
             h.close_connection = True
@@ -256,15 +304,31 @@ class FakePenfield:
             key = r.authorization.removeprefix("Bearer ")
             if not key.startswith("tm_") or key in self.rejected_api_keys:
                 return 401, _error(401, "invalid API key")
-            return 200, _ok(self._issue_tokens())
+            issued = self._issue_tokens(scopes=self.api_key_scopes.get(key, ALL_SCOPES))
+            if not self.key_exchange_gives_refresh_token:
+                self.valid_refresh_tokens.discard(issued["refresh_token"])
+                issued["refresh_token"] = None
+            return 200, _ok(issued)
         if (m, p) == ("POST", "/auth/refresh"):
             token = (r.body or {}).get("refresh_token") if isinstance(r.body, dict) else None
             if token not in self.valid_refresh_tokens:
                 return 401, _error(401, "invalid refresh token")
             self.valid_refresh_tokens.discard(token)
-            return 200, _ok(self._issue_tokens())
-        if r.authorization.removeprefix("Bearer ") not in self.valid_access_tokens:
+            grant = self._refresh_grants.pop(token, {})
+            return 200, _ok(self._issue_tokens(scopes=grant.get("scopes", ALL_SCOPES)))
+        if p == "/.well-known/oauth-authorization-server" or p.startswith("/oauth/"):
+            return self._oauth(r)
+        access = r.authorization.removeprefix("Bearer ")
+        if access not in self.valid_access_tokens:
             return 401, _error(401, "invalid or expired token")
+        needed = "read" if m == "GET" else "delete" if m == "DELETE" else "write"
+        if p in _READ_ONLY_POSTS:
+            needed = "read"
+        if needed not in self._token_scopes.get(access, ALL_SCOPES):
+            # The live API's wording and code.
+            refused = _error(403, f"Insufficient permissions. Required scope(s): {needed}, admin")
+            refused["error"]["code"] = "AUTH_INSUFFICIENT_PERMISSIONS"
+            return 403, refused
 
         if (m, p) == ("GET", "/personality/awakening"):
             return 200, _ok({"briefing": self.briefing})
@@ -304,18 +368,118 @@ class FakePenfield:
         return 404, _error(404, f"no route for {m} {p}")
 
     # -- auth -----------------------------------------------------------
-    def _issue_tokens(self) -> dict[str, Any]:
+    def _issue_tokens(
+        self,
+        *,
+        scopes: frozenset[str] = ALL_SCOPES,
+        scope: str | None = None,
+        client_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Issue a token pair: for an API key (``scopes``) or a sign-in (``scope``)."""
         self._seq += 1
-        access, refresh = f"access-{self._seq}", f"refresh-{self._seq}"
+        oauth = scope is not None
+        granted = frozenset(scope.split()) & ALL_SCOPES if scope is not None else scopes
+        claims = {
+            "type": "access",
+            "auth_type": "oauth_device_code" if oauth else "api_key",
+            # The live API lists a sign-in's scopes as granted, offline_access included.
+            "scopes": scope.split() if scope is not None else sorted(granted),
+            "seq": self._seq,
+        }
+        access = f"e30.{_b64(json.dumps(claims).encode())}.sig{self._seq}"
+        refresh = f"refresh-{self._seq}"
         self.valid_access_tokens.add(access)
-        self.valid_refresh_tokens.add(refresh)
-        return {
+        self._token_scopes[access] = granted
+        tokens: dict[str, Any] = {
             "access_token": access,
             "token_type": "Bearer",
             "expires_in": 86400,
-            "tenant_id": "pf_test",
-            "refresh_token": refresh,
         }
+        if oauth:
+            tokens["scope"] = scope
+            if "offline_access" not in (scope or "").split():
+                return tokens
+        else:
+            tokens["tenant_id"] = "pf_test"
+        self.valid_refresh_tokens.add(refresh)
+        self._refresh_grants[refresh] = {"scopes": granted, "scope": scope, "client_id": client_id}
+        tokens["refresh_token"] = refresh
+        return tokens
+
+    def _register(self, body: dict[str, Any]) -> dict[str, Any]:
+        client_id = f"client-{len(self.clients) + 1}"
+        self.clients[client_id] = str(body.get("scope") or "")
+        return {"client_id": client_id, "scope": self.clients[client_id]}
+
+    def _oauth(self, r: Recorded) -> tuple[int, dict[str, Any]]:
+        """The auth server's side of a browser sign-in (RFC 8414, 7591, 8628, 7009)."""
+        m, p = r.method, r.path
+        form = {k: v[0] for k, v in parse_qs(r.body).items()} if isinstance(r.body, str) else {}
+        if p == "/.well-known/oauth-authorization-server":
+            return 200, {
+                "issuer": self.root,
+                "token_endpoint": f"{self.root}/oauth/token",
+                "device_authorization_endpoint": f"{self.root}/oauth/device_authorization",
+                "registration_endpoint": f"{self.root}/oauth/register",
+                "revocation_endpoint": f"{self.root}/oauth/revoke",
+                "scopes_supported": list(SCOPES_SUPPORTED),
+            }
+        if (m, p) == ("POST", "/oauth/register"):
+            return 200, self._register(r.body if isinstance(r.body, dict) else {})
+        if (m, p) == ("POST", "/oauth/device_authorization"):
+            if form.get("client_id") not in self.clients:
+                return 400, {"error": "invalid_client"}
+            code = f"device-{len(self.sign_ins) + 1}"
+            user_code = f"TEST-{len(self.sign_ins) + 1:04d}"
+            self.sign_ins[code] = {
+                "client_id": form["client_id"],
+                "scope": form.get("scope", ""),
+                "state": "pending",
+                "expires": time.time() + self.device_code_lifetime,
+                "polls": 0,
+            }
+            return 200, {
+                "device_code": code,
+                "user_code": user_code,
+                "verification_uri": f"{self.root}/device",
+                "verification_uri_complete": f"{self.root}/device?user_code={user_code}",
+                "expires_in": int(self.device_code_lifetime),
+                "interval": self.device_poll_interval,
+            }
+        if (m, p) == ("POST", "/oauth/revoke"):
+            token = form.get("token", "")
+            self.revoked.append(token)
+            self.valid_access_tokens.discard(token)
+            self.valid_refresh_tokens.discard(token)
+            return 200, {}
+        if (m, p) == ("POST", "/oauth/token"):
+            if form.get("grant_type") == "refresh_token":
+                token = form.get("refresh_token", "")
+                grant = self._refresh_grants.get(token, {})
+                if token not in self.valid_refresh_tokens or grant.get("client_id") != form.get(
+                    "client_id"
+                ):
+                    return 400, {"error": "invalid_grant"}
+                self.valid_refresh_tokens.discard(token)
+                del self._refresh_grants[token]
+                return 200, self._issue_tokens(scope=grant["scope"], client_id=grant["client_id"])
+            sign_in = self.sign_ins.get(form.get("device_code", ""))
+            if sign_in is None or sign_in["client_id"] != form.get("client_id"):
+                return 400, {"error": "invalid_grant"}
+            sign_in["polls"] += 1
+            if time.time() >= sign_in["expires"]:
+                return 400, {"error": "invalid_grant"}
+            if sign_in["state"] == "pending" and self.approve_sign_ins:
+                sign_in["state"] = "approved"
+            if sign_in["state"] == "pending" and self.refuse_sign_ins:
+                sign_in["state"] = "refused"
+            if sign_in["state"] == "pending":
+                return 400, {"error": "authorization_pending"}
+            if sign_in["state"] == "refused":
+                return 400, {"error": "access_denied"}
+            del self.sign_ins[form["device_code"]]
+            return 200, self._issue_tokens(scope=sign_in["scope"], client_id=sign_in["client_id"])
+        return 404, {"error": "not_found"}
 
     # -- memories -------------------------------------------------------
     def _insert(self, fields: dict[str, Any], *, memory_id: str | None = None) -> dict[str, Any]:
@@ -581,7 +745,14 @@ class FakePenfield:
                 }
             )
         if method == "POST":
-            body = r.body or {}
+            body = r.body if isinstance(r.body, dict) else {}
+            for name in ("path", "content"):
+                if not isinstance(body.get(name), str):
+                    return 422, _invalid(name, "Input should be a valid string")
+            if not body["path"].startswith("/"):
+                return 400, _error(400, "Path must start with /")
+            if body["path"].endswith("/"):
+                return 400, _error(400, "Path must specify a filename, not a directory")
             self.artifacts[body["path"]] = body["content"]
             return 200, _ok(
                 {
@@ -611,6 +782,16 @@ class FakePenfield:
             del self.artifacts[target]
             return 200, _ok({"message": f"Artifact deleted: {target}"})
         return 405, _error(405, "method not allowed")
+
+
+#: Paths that keep answering during an outage of the API itself.
+_AUTH_PATHS = ("/auth/", "/oauth/", "/.well-known/")
+#: Requests sent with POST that only read.
+_READ_ONLY_POSTS = frozenset({"/search/hybrid", "/relationships/traverse", "/analysis/reflect"})
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
 def _public(mem: dict[str, Any]) -> dict[str, Any]:

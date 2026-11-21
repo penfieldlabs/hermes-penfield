@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Penfield
 """Unit tests for the client: envelope unwrapping, backoff, rate limit.
 
-Network is fully mocked via monkeypatching ``urllib.request.urlopen``.
+Network is fully mocked via monkeypatching ``transport.urlopen``.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from penfield import transport
 from penfield.client import PenfieldClient, _unwrap
 from penfield.config import Environment, PenfieldConfig
 from penfield.exceptions import APIError, NotFoundError, RateLimitError, ValidationError
@@ -93,7 +94,7 @@ class TestPathResolution:
             captured["url"] = req.full_url
             return FakeResp(b"")
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         client.call("memory_get", path_params={"memory_id": "abc-123"})
         assert captured["url"].endswith("/memories/abc-123")
 
@@ -116,7 +117,7 @@ class TestErrorClassification:
         def fake_urlopen(req: urllib.request.Request, timeout: float = 0) -> FakeResp:
             raise make_http_error(404, body)
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         with pytest.raises(NotFoundError):
             client.call("memory_get", path_params={"memory_id": "x"})
 
@@ -131,7 +132,7 @@ class TestErrorClassification:
             calls["n"] += 1
             raise make_http_error(422, body)
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         with pytest.raises(ValidationError):
             client.call("memory_create", body={"content": "x"})
         assert calls["n"] == 1  # 422 is not retried
@@ -155,7 +156,7 @@ class TestRetryBackoff:
                 raise make_http_error(500, b"server error")
             return FakeResp(good)
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         result = client.call("memory_get", path_params={"memory_id": "x"})
         assert result == {"ok": True}
         assert calls["n"] == 3
@@ -166,7 +167,7 @@ class TestRetryBackoff:
         def fake_urlopen(req: urllib.request.Request, timeout: float = 0) -> FakeResp:
             raise make_http_error(429, b"slow down", headers={"Retry-After": "0"})
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         with pytest.raises(RateLimitError):
             client.call("memory_get", path_params={"memory_id": "x"})
 
@@ -182,7 +183,7 @@ class TestRetryBackoff:
                 raise make_http_error(401, b"unauth")
             return FakeResp(good)
 
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(transport, "urlopen", fake_urlopen)
         result = client.call("memory_get", path_params={"memory_id": "x"})
         assert result == {"ok": True}
         assert fake_auth.refresh_calls == 1
@@ -209,7 +210,7 @@ class TestRateLimit:
 
         c = PenfieldClient(Auth(), dev_config, max_rpm=2, sleep=lambda s: sleeps.append(s))
         good = json.dumps({"status": "success", "data": {}}).encode()
-        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: FakeResp(good))
+        monkeypatch.setattr(transport, "urlopen", lambda *a, **k: FakeResp(good))
         c.call("memory_get", path_params={"memory_id": "a"})
         c.call("memory_get", path_params={"memory_id": "b"})
         # Third call should exceed the cap and trigger a sleep.
