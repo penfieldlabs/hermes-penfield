@@ -6,6 +6,40 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-21
+
+The agent is told about a tag Penfield does not store, and a profile
+keeps one registration for its browser sign-ins.
+
+### Changed
+- `penfield_store` and `penfield_update_memory` refuse a tag Penfield
+  does not store and name it by its position in the list, so the agent
+  can correct it. Penfield rewrites a tag to lower case with only a-z,
+  0-9 and hyphens, and stores it if 2 to 50 characters are left. A tag
+  left with more, or with fewer (one letter, `c++`, a tag in another
+  script), used to be sent, and the memory was stored without it.
+- More than 10 tags in one call are refused before anything is sent,
+  with the count.
+- A blank tag, which a model sends when it means none, is left out
+  instead of being sent.
+- The descriptions of both tools say what becomes of a tag and when one
+  is refused.
+- `penfield_save_context` and the checkpoint saved before compression
+  send the checkpoint's name as a tag only where it can be stored as
+  one. The name itself is not limited and is found as before.
+- A profile registers with Penfield's sign-in server once and uses that
+  registration for later browser sign-ins. It is kept in
+  `penfield/client.json` (mode `0600`). Before, every sign-in made a new
+  registration. The plugin registers again only if the sign-in server no
+  longer knows the one it kept.
+- The plugin registers as "Hermes Agent (Penfield plugin)" instead of
+  `hermes-penfield`. The first sign-in after the upgrade registers under
+  the new name.
+- A sign-in that is refused while it uses the kept registration says how
+  to start over: delete `penfield/client.json` and sign in again.
+
+See ADR-0028 and ADR-0029.
+
 ## [0.3.1] - 2026-11-21
 
 Browser sign-in becomes the first way to connect, and the sign-in and
@@ -250,7 +284,8 @@ Initial release. Self-contained Hermes Agent memory provider for Penfield.
 - Environment switching via `PENFIELD_ENV` (prod/dev)
 - Auto-awakening: persona and persistent context load on every session
 
-[Unreleased]: https://github.com/penfieldlabs/hermes-penfield/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/penfieldlabs/hermes-penfield/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.2
 [0.3.1]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.1
 [0.3.0]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.3.0
 [0.2.0]: https://github.com/penfieldlabs/hermes-penfield/releases/tag/v0.2.0

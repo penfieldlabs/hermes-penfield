@@ -17,7 +17,10 @@ Best-effort response, typically within two weeks.
   `penfield/tokens.json` inside the profile directory. `hermes penfield
   logout` revokes the sign-in at Penfield, so the tokens stop working
   everywhere, and deletes the file. Signing in again revokes the sign-in
-  it replaces.
+  it replaces. The profile registers with Penfield's sign-in server once
+  and keeps the client id it was given in `penfield/client.json` for
+  later sign-ins. A client id is not a credential: nothing can be read
+  or written with it, and `logout` leaves it in place.
 - **API key.** The alternative, and the way to limit what an agent may
   do: a key can be read-only, read and write, or read, write and delete.
   Hermes stores it in the profile's `.env` as `PENFIELD_API_KEY`. The

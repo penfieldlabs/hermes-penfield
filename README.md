@@ -48,6 +48,12 @@ and Penfield is its memory provider. The tokens are kept in
 `penfield/tokens.json` in your profile, readable only by you, and renewed
 automatically.
 
+A profile registers with Penfield as "Hermes Agent (Penfield plugin)" at
+its first sign-in and uses the same registration for every later one. It
+is kept in `penfield/client.json`. Should a sign-in ever be refused
+because of it, delete that file and sign in again: the profile then
+registers anew.
+
 Check the result at any time:
 
 ```bash
@@ -150,6 +156,15 @@ prefix, so an agent that knows Penfield from another client works the
 same way here. One parameter is missing: `include_inactive` on recall and
 search, which Penfield's REST API does not act on.
 
+Penfield rewrites a tag before it stores it: lower case, spaces and
+underscores as hyphens, and every other character that is not a-z, 0-9
+or a hyphen removed, so `C++ Tips` is stored as `c-tips`. What is left
+has to be 2 to 50 characters long, and a memory can have up to 10 tags.
+`penfield_store` and `penfield_update_memory` refuse a tag that would be
+left shorter or longer than that, naming it by its position in the list,
+and refuse more than 10 tags, so the agent can correct the call and make
+it again.
+
 ## Settings
 
 Everything works without configuration. To change behaviour, create
@@ -197,9 +212,11 @@ follow redirects. There is no telemetry. Requests identify themselves as
 Hermes removes credentials it recognises from all of this before the
 plugin sees it.
 
-On your machine the plugin writes two files in the profile directory:
-`penfield/config.json` (settings, never the API key) and, after a browser
-sign-in or a token exchange, `penfield/tokens.json` (mode `0600`).
+On your machine the plugin writes up to three files in the profile
+directory: `penfield/config.json` (settings, never the API key), after a
+browser sign-in or a token exchange `penfield/tokens.json`, and after a
+browser sign-in `penfield/client.json`, the profile's registration with
+Penfield's sign-in server. The last two have mode `0600`.
 
 ## Command line
 

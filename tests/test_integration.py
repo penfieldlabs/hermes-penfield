@@ -36,7 +36,7 @@ from penfield.client import PenfieldClient
 from penfield.constants import MEMORY_SOURCE_TYPES, SEMANTIC_SEARCH_WEIGHTS
 from penfield.exceptions import NotFoundError, PenfieldError, ValidationError
 from penfield.provider import TOOL_GUIDANCE, PenfieldMemoryProvider
-from penfield.tools import REFLECT_WINDOWS, dispatch
+from penfield.tools import REFLECT_WINDOWS, dispatch, stored_tag
 
 pytestmark = pytest.mark.integration
 
@@ -131,6 +131,64 @@ class TestMemories:
         assert tag in fetched["tags"]
         assert fetched["memory_type"]
         assert updated["importance"] == 0.9
+
+    def test_tags_are_stored_the_way_the_plugin_measures_them(
+        self, live_client: PenfieldClient, remember: Callable[..., dict[str, Any]], tag: str
+    ) -> None:
+        given = ["Two Words", "under_score", "a.b", "-a--b-", "タグ ab", "t" * 50, "yz", "42"]
+        stored = remember("Tags as Penfield stores them.", tags=given)
+
+        fetched = _tool(live_client, "penfield_fetch", id=stored["id"])
+
+        assert sorted(fetched["tags"]) == sorted({stored_tag(t) for t in [tag, *given]})
+
+    def test_penfield_does_not_store_the_tags_the_plugin_refuses(
+        self, live_client: PenfieldClient, can_delete: bool, tag: str
+    ) -> None:
+        """Sent past the tool, straight to the API: the memory is stored without them."""
+        if not can_delete and not os.environ.get("PENFIELD_TEST_ALLOW_LEFTOVERS"):
+            pytest.skip("this API key cannot delete memories; see the module docstring")
+        refused = ["x", "7", "a-", "c++", "日本語タグ", "é-b", "b" * 51, "c" * 100]
+        for one in refused:
+            with pytest.raises(ValueError, match=r"^tag 2 "):
+                dispatch(
+                    live_client, "penfield_store", {"content": "never sent", "tags": [tag, one]}
+                )
+
+        created = live_client.call(
+            "memory_create",
+            body={"content": f"Tags Penfield does not store. {tag}", "tags": [tag, *refused]},
+        )
+        try:
+            fetched = live_client.call("memory_get", path_params={"memory_id": created["id"]})
+            assert fetched["tags"] == [tag]
+        finally:
+            if can_delete:
+                live_client.call("memory_delete", path_params={"memory_id": created["id"]})
+
+    def test_penfield_refuses_more_tags_than_the_plugin_lets_through(
+        self, live_client: PenfieldClient, remember: Callable[..., dict[str, Any]], tag: str
+    ) -> None:
+        """Sent past the tool: the API counts the tags as written and says no."""
+        eleven = [tag, *(f"{tag}-{n}" for n in range(10))]
+        for tool, args in (
+            ("penfield_store", {"content": "never sent"}),
+            ("penfield_update_memory", {"memory_id": "never-sent"}),
+        ):
+            with pytest.raises(ValueError, match=r"^11 tags were given"):
+                dispatch(live_client, tool, {**args, "tags": eleven})
+
+        with pytest.raises(ValidationError, match="at most 10"):
+            live_client.call(
+                "memory_create", body={"content": f"Too many tags. {tag}", "tags": eleven}
+            )
+        stored = remember("As many tags as a memory can have.", tags=eleven[1:10])
+        with pytest.raises(ValidationError, match="at most 10"):
+            live_client.call(
+                "memory_update", path_params={"memory_id": stored["id"]}, body={"tags": eleven}
+            )
+        fetched = _tool(live_client, "penfield_fetch", id=stored["id"])
+        assert sorted(fetched["tags"]) == sorted(eleven[:10]), "the refused update changed nothing"
 
     def test_recall_returns_the_whole_memory_with_its_details(
         self, live_client: PenfieldClient, remember: Callable[..., dict[str, Any]], tag: str

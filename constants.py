@@ -115,6 +115,9 @@ API_KEYS_URL = "https://portal.penfield.app/settings/api-keys"
 #: ``offline_access`` so that the sign-in can renew itself.
 SIGN_IN_SCOPE = "read write delete offline_access"
 
+#: The name a browser sign-in registers under at Penfield's sign-in server.
+SIGN_IN_CLIENT_NAME = "Hermes Agent (Penfield plugin)"
+
 # Requests that create something new on every call. Repeating one after a
 # timeout or a 5xx can store the same thing twice, so these are never
 # retried on an ambiguous failure. Every other endpoint is a read or an
@@ -126,7 +129,7 @@ REFRESH_SKEW_SECONDS = 300.0
 
 # The plugin version. plugin.yaml carries the same value for Hermes; a test
 # keeps the two in step.
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 USER_AGENT = f"hermes-penfield/{VERSION}"
 
 # ---------------------------------------------------------------------------
@@ -158,6 +161,12 @@ DOCUMENT_SOURCE_TYPE = "document_upload"
 # is what sets it apart from penfield_recall. Each set sums to 1.
 SEMANTIC_SEARCH_WEIGHTS = {"bm25_weight": 0.1, "vector_weight": 0.7, "graph_weight": 0.2}
 MEMORY_SOURCE_TYPES = ("direct_input", "conversation", "api_import", "checkpoint")
+
+# A tag as Penfield stores it has this many characters. See tools.stored_tag.
+TAG_MIN_CHARS = 2
+TAG_MAX_CHARS = 50
+# A memory has at most this many tags.
+TAGS_PER_MEMORY = 10
 
 # 24 relationship types (docs verified working as of 2026-01-22).
 RELATIONSHIP_TYPES = (

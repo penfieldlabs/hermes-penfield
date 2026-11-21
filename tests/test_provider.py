@@ -333,6 +333,39 @@ class TestToolCalls:
         result = json.loads(provider.handle_tool_call("penfield_store", {}))
         assert "content" in result["error"]
 
+    def test_a_tag_penfield_would_not_store_is_refused_before_any_request(
+        self, api: FakePenfield, provider: PenfieldMemoryProvider
+    ) -> None:
+        result = json.loads(
+            provider.handle_tool_call(
+                "penfield_store", {"content": "a fact", "tags": ["launch", "b" * 51]}
+            )
+        )
+        assert result["error"].startswith("tag 2 ")
+        assert "at most 50" in result["error"]
+        assert api.calls("POST", "/memories") == []
+
+    def test_an_eleventh_tag_is_refused_before_any_request(
+        self, api: FakePenfield, provider: PenfieldMemoryProvider
+    ) -> None:
+        result = json.loads(
+            provider.handle_tool_call(
+                "penfield_store", {"content": "a fact", "tags": [f"tag-{n}" for n in range(11)]}
+            )
+        )
+        assert result["error"] == "11 tags were given and a memory can have at most 10"
+        assert api.calls("POST", "/memories") == []
+
+    def test_tags_come_back_the_way_penfield_stores_them(
+        self, provider: PenfieldMemoryProvider
+    ) -> None:
+        result = json.loads(
+            provider.handle_tool_call(
+                "penfield_store", {"content": "a fact", "tags": ["Two Words", "a.b"]}
+            )
+        )
+        assert result["tags"] == ["ab", "two-words"]
+
     def test_api_rejection_is_reported(
         self, api: FakePenfield, provider: PenfieldMemoryProvider
     ) -> None:

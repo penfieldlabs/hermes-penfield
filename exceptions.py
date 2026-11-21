@@ -22,6 +22,8 @@ class AuthError(PenfieldError):
 
     #: HTTP status of the answer that caused it, when there was one.
     status: int | None = None
+    #: The OAuth ``error`` value of that answer, when it carried one.
+    code: str = ""
 
 
 class TokenExpiredError(AuthError):

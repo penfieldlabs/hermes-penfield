@@ -57,6 +57,7 @@ from .constants import (
     DEV_HOSTS,
     PROD_HOSTS,
     REFRESH_SKEW_SECONDS,
+    SIGN_IN_CLIENT_NAME,
     SIGN_IN_SCOPE,
     USER_AGENT,
 )
@@ -548,9 +549,11 @@ class PenfieldAuth:
     ) -> TokenSet:
         """Run the OAuth device code flow.
 
-        Performs dynamic client registration when ``client_id`` is not
-        supplied, then requests a device code, shows the verification URL,
-        and polls until the user authorizes or the code expires. An auth
+        Requests a device code, shows the verification URL, and polls until
+        the user authorizes or the code expires. Without a ``client_id`` the
+        profile registers with the auth server once and keeps the
+        registration for later sign-ins; it registers again only when the
+        server no longer knows it. An auth
         server that stumbles while the user is in the browser does not end
         the wait; one that keeps failing is named, while waiting and in the
         error if the code runs out. A browser sign-in the profile already
@@ -558,7 +561,8 @@ class PenfieldAuth:
         it afterwards.
 
         Args:
-            client_id: Pre-registered client id. If absent, registers one.
+            client_id: Pre-registered client id. It is used as given and
+                never kept or replaced.
             scope: OAuth scopes; ``offline_access`` is required for refresh.
             poll_interval_override: Tests inject this to avoid real sleeps.
             say: Shows one line to the user; ``print`` by default.
@@ -574,12 +578,20 @@ class PenfieldAuth:
         discovery = self._discovery()
         device_auth_url = _endpoint(discovery, "device_authorization_endpoint")
         token_url = _endpoint(discovery, "token_endpoint")
-        cid = client_id or self._register_client(discovery, scope)
-
-        data = urllib.parse.urlencode({"client_id": cid, "scope": scope}).encode()
-        resp = _http(
-            "POST", device_auth_url, body=data, headers=_FORM_HEADERS, timeout=self._timeout
-        )
+        kept = None if client_id else self._kept_client(scope)
+        cid = client_id or kept or self._new_client(discovery, scope)
+        try:
+            resp = self._ask_for_device_code(device_auth_url, cid, scope)
+        except AuthError as exc:
+            if cid != kept or isinstance(exc, AuthTransportError):
+                raise
+            # Only a registration this profile kept is replaced, and only
+            # when the auth server says it does not know it. Any other
+            # refusal is reported, with the way to start over.
+            if exc.code != "invalid_client":
+                raise self._kept_client_refused(exc) from exc
+            cid = self._new_client(discovery, scope)
+            resp = self._ask_for_device_code(device_auth_url, cid, scope)
         device_code = _field(resp, "device_code")
         user_code = str(resp.get("user_code") or "")
         verification_uri = str(
@@ -678,6 +690,59 @@ class PenfieldAuth:
         well_known = f"{base}/.well-known/oauth-authorization-server"
         return _http("GET", well_known, headers=_default_headers(), timeout=self._timeout)
 
+    def _ask_for_device_code(self, url: str, client_id: str, scope: str) -> dict[str, Any]:
+        data = urllib.parse.urlencode({"client_id": client_id, "scope": scope}).encode()
+        return _http("POST", url, body=data, headers=_FORM_HEADERS, timeout=self._timeout)
+
+    # ------------------------------------------------------------------
+    # The registration a profile keeps
+    # ------------------------------------------------------------------
+    def _kept_clients(self) -> dict[str, Any]:
+        """Return the registrations kept in the profile, by API address."""
+        if self._hermes_home is None:
+            return {}
+        try:
+            path = self._config.client_path(self._hermes_home)
+            kept = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            # Missing, unreadable or not JSON: the same as none kept.
+            return {}
+        return kept if isinstance(kept, dict) else {}
+
+    def _kept_client(self, scope: str) -> str | None:
+        """Return the client id this profile registered at this address for ``scope``."""
+        entry = self._kept_clients().get(self._config.api_base)
+        if not isinstance(entry, dict) or entry.get("scope") != scope:
+            return None
+        client_id = entry.get("client_id")
+        return client_id if isinstance(client_id, str) and client_id else None
+
+    def _kept_client_refused(self, refused: AuthError) -> AuthError:
+        """Add the way to start over to a refusal met with the kept registration."""
+        where = self._config.client_path(self._hermes_home or "")
+        told = AuthError(
+            f"{refused}. The sign-in used the registration this profile keeps. "
+            f"If it is refused again, delete {where} and sign in again"
+        )
+        told.status, told.code = refused.status, refused.code
+        return told
+
+    def _new_client(self, discovery: dict[str, Any], scope: str) -> str:
+        """Register with the auth server and keep the registration.
+
+        A registration that cannot be written is used for this sign-in and
+        made again at the next one.
+        """
+        client_id = self._register_client(discovery, scope)
+        if self._hermes_home is not None:
+            clients = self._kept_clients()
+            clients[self._config.api_base] = {"client_id": client_id, "scope": scope}
+            try:
+                _write_private(self._config.client_path(self._hermes_home), clients)
+            except OSError as exc:
+                logger.warning("could not keep the sign-in registration: %s", exc)
+        return client_id
+
     def _register_client(self, discovery: dict[str, Any], scope: str) -> str:
         reg_url = _endpoint(discovery, "registration_endpoint", required=False)
         if not reg_url:
@@ -686,7 +751,7 @@ class PenfieldAuth:
             )
         body = json.dumps(
             {
-                "client_name": "hermes-penfield",
+                "client_name": SIGN_IN_CLIENT_NAME,
                 "redirect_uris": ["http://localhost:0/callback"],
                 "grant_types": [
                     "urn:ietf:params:oauth:grant-type:device_code",
@@ -743,20 +808,10 @@ class PenfieldAuth:
         if self._hermes_home is None or self._tokens is None:
             return
         self._tokens.api_base = self._config.api_base
-        path = self._config.token_path(self._hermes_home)
-        tmp_name = ""
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            # mkstemp creates the file with mode 0o600.
-            fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".tokens-", suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(self._tokens.to_dict(), fh)
-            os.replace(tmp_name, path)
+            _write_private(self._config.token_path(self._hermes_home), self._tokens.to_dict())
         except OSError as exc:
             logger.warning("could not write the Penfield token cache: %s", exc)
-            if tmp_name:
-                with contextlib.suppress(OSError):
-                    os.unlink(tmp_name)
 
     def _read_cache(self) -> TokenSet | None:
         """Return whatever token set is on disk, usable here or not."""
@@ -891,6 +946,27 @@ class _OAuthSlowDownError(Exception):
     """RFC 8628 ``slow_down``: increase interval."""
 
 
+def _write_private(path: Path, record: dict[str, Any]) -> None:
+    """Write ``record`` as JSON: private from creation, replaced atomically.
+
+    Raises:
+        OSError: If the file could not be written. Nothing is left behind.
+    """
+    tmp_name = ""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # mkstemp creates the file with mode 0o600.
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(record, fh)
+        os.replace(tmp_name, path)
+    except OSError:
+        if tmp_name:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+        raise
+
+
 def _default_headers(auth_value: str | None = None) -> dict[str, str]:
     """Build the default header set, optionally adding a bearer value."""
     h: dict[str, str] = {
@@ -994,6 +1070,10 @@ def _http(
             raise _OAuthError(err_code or str(status))
         refused = AuthError(f"auth request failed ({status}): {' '.join(detail.split())[:200]}")
         refused.status = status
+        with contextlib.suppress(ValueError):
+            answer_body = json.loads(detail)
+            if isinstance(answer_body, dict) and isinstance(answer_body.get("error"), str):
+                refused.code = answer_body["error"]
         raise refused
 
     if not answer.body:

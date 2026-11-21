@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from penfield.client import PenfieldClient
-from penfield.tools import dispatch
+from penfield.tools import PENFIELD_TOOL_SCHEMAS, dispatch, stored_tag
 
 from tests.support.fake_penfield import FakePenfield
 
@@ -44,6 +44,159 @@ class TestStore:
         name, body, _ = c.calls[0]
         assert name == "memory_create"
         assert body == {"content": "hello"}
+
+
+WRITES_WITH_TAGS = {
+    "penfield_store": {"content": "c"},
+    "penfield_update_memory": {"memory_id": "m-1"},
+}
+
+
+@pytest.mark.parametrize("tool", list(WRITES_WITH_TAGS))
+class TestATagPenfieldWouldNotStore:
+    """Penfield stores a tag as a-z, 0-9 and hyphens, 2 to 50 characters long.
+
+    It does not store a tag outside that, so the call is refused before
+    anything is sent and the agent can correct the tag.
+    """
+
+    def test_a_tag_that_is_too_long_is_refused_by_its_position(self, tool: str) -> None:
+        c = _RecordingClient()
+        with pytest.raises(
+            ValueError, match=r"^tag 2 \('b{20}\.\.\.'\) is too long: 51 characters"
+        ) as told:
+            dispatch(c, tool, {**WRITES_WITH_TAGS[tool], "tags": ["launch", "b" * 51]})
+        assert "at most 50" in str(told.value)
+        assert c.calls == []
+
+    def test_a_tag_at_the_limit_is_sent(self, tool: str) -> None:
+        c = _RecordingClient()
+        dispatch(c, tool, {**WRITES_WITH_TAGS[tool], "tags": ["launch", "b" * 50]})
+        assert c.calls[0][1]["tags"] == ["launch", "b" * 50]
+
+    @pytest.mark.parametrize(
+        "tag",
+        ["  " + "p" * 50 + "  ", "q" * 48 + "!!!", ("s" * 9 + " ") * 5, "-" + "t" * 50 + "-"],
+        ids=["padded", "with characters Penfield drops", "with spaces", "with hyphens outside"],
+    )
+    def test_the_limit_counts_what_penfield_stores(self, tool: str, tag: str) -> None:
+        c = _RecordingClient()
+        dispatch(c, tool, {**WRITES_WITH_TAGS[tool], "tags": [tag]})
+        assert c.calls[0][1]["tags"] == [tag], "a tag is sent as the agent wrote it"
+
+    @pytest.mark.parametrize("tag", ["x", "7", "__", "a-", "c++", "C#", "日本語タグ", "é-b", "!"])
+    def test_a_tag_with_too_little_left_is_refused(self, tool: str, tag: str) -> None:
+        c = _RecordingClient()
+        with pytest.raises(ValueError, match=r"^tag 3 \(.*\) would not be stored") as told:
+            dispatch(c, tool, {**WRITES_WITH_TAGS[tool], "tags": ["launch", "dns", tag]})
+        assert "at least 2" in str(told.value)
+        assert c.calls == []
+
+    @pytest.mark.parametrize("tag", ["42", "a.b", "タグ ab", "-a-b-", "a--b", "Two Words", "yz"])
+    def test_a_tag_penfield_can_store_is_sent(self, tool: str, tag: str) -> None:
+        c = _RecordingClient()
+        dispatch(c, tool, {**WRITES_WITH_TAGS[tool], "tags": [tag]})
+        assert c.calls[0][1]["tags"] == [tag]
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_tag_is_left_out_and_does_not_shift_the_count(
+        self, tool: str, blank: str
+    ) -> None:
+        """A model that means no tag sends an empty one."""
+        c = _RecordingClient()
+        dispatch(c, tool, {**WRITES_WITH_TAGS[tool], "content": "c", "tags": [blank, "launch"]})
+        assert c.calls[0][1] == {"content": "c", "tags": ["launch"]}
+
+        with pytest.raises(ValueError, match=r"^tag 3 "):
+            dispatch(c, tool, {**WRITES_WITH_TAGS[tool], "tags": ["launch", blank, "b" * 51]})
+
+    def test_nothing_but_blank_tags_is_no_tags(self, tool: str) -> None:
+        c = _RecordingClient()
+        dispatch(c, tool, {**WRITES_WITH_TAGS[tool], "content": "c", "tags": ["", " "]})
+        assert c.calls[0][1] == {"content": "c"}
+
+    def test_more_tags_than_a_memory_can_have_are_refused(self, tool: str) -> None:
+        c = _RecordingClient()
+        eleven = [f"tag-{n}" for n in range(11)]
+        with pytest.raises(
+            ValueError, match=r"^11 tags were given and a memory can have at most 10$"
+        ):
+            dispatch(c, tool, {**WRITES_WITH_TAGS[tool], "tags": eleven})
+        assert c.calls == []
+
+    def test_as_many_tags_as_a_memory_can_have_are_sent(self, tool: str) -> None:
+        c = _RecordingClient()
+        ten = [f"tag-{n}" for n in range(10)]
+        dispatch(c, tool, {**WRITES_WITH_TAGS[tool], "tags": [*ten, " "]})
+        assert c.calls[0][1]["tags"] == ten, "a blank tag does not count"
+
+    def test_the_tool_tells_the_agent_what_becomes_of_a_tag(self, tool: str) -> None:
+        """Other characters are dropped, not refused; only what is left decides."""
+        (schema,) = [t for t in PENFIELD_TOOL_SCHEMAS if t["name"] == tool]
+        note = schema["parameters"]["properties"]["tags"]["description"]
+        assert "removes every other character" in note
+        assert "fewer than 2 or more than 50 characters" in note
+        assert "Up to 10 tags" in note
+
+    def test_tags_written_as_one_text_are_checked_the_same_way(self, tool: str) -> None:
+        c = _RecordingClient()
+        with pytest.raises(ValueError, match=r"^tag 2 "):
+            dispatch(c, tool, {**WRITES_WITH_TAGS[tool], "tags": "launch, " + "b" * 51})
+        assert c.calls == []
+
+
+@pytest.mark.parametrize(
+    ("given", "stored"),
+    [
+        ("Python", "python"),
+        ("Best Practices", "best-practices"),
+        ("async_await", "async-await"),
+        ("project:alpha", "projectalpha"),
+        ("  spaced  ", "spaced"),
+        ("-a-b-", "a-b"),
+        ("a--b", "a-b"),
+        ("a  b", "a-b"),
+        ("タグ ab", "ab"),
+        ("é-b", "b"),
+        ("日本語タグ", ""),
+    ],
+)
+def test_a_tag_is_measured_the_way_penfield_stores_it(given: str, stored: str) -> None:
+    assert stored_tag(given) == stored
+
+
+class TestASearchByTag:
+    def test_a_filter_is_not_a_write_and_is_sent_as_given(self) -> None:
+        c = _RecordingClient()
+        dispatch(c, "penfield_recall", {"query": "q", "tags": ["b" * 51]})
+        assert c.calls[0][1]["tags"] == "b" * 51
+
+
+@pytest.mark.parametrize("tool", list(WRITES_WITH_TAGS))
+class TestWhatAWriteCannotSet:
+    """The kind of a memory and where it came from are not the agent's to set.
+
+    Personality memories are managed in the Penfield portal, and Penfield
+    records the source of a memory itself.
+    """
+
+    def test_the_tool_takes_no_memory_type_and_no_source_type(self, tool: str) -> None:
+        (schema,) = [t for t in PENFIELD_TOOL_SCHEMAS if t["name"] == tool]
+        assert not {"memory_type", "source_type"} & set(schema["parameters"]["properties"])
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"memory_type": "identity_core"},
+            {"memory_type": "personality_trait"},
+            {"source_type": "artifact_index"},
+            {"source_type": "web_scrape"},
+        ],
+    )
+    def test_one_passed_anyway_is_not_sent(self, tool: str, extra: dict[str, str]) -> None:
+        c = _RecordingClient()
+        dispatch(c, tool, {**WRITES_WITH_TAGS[tool], "content": "c", "tags": ["launch"], **extra})
+        assert c.calls[0][1] == {"content": "c", "tags": ["launch"]}
 
 
 class TestRecall:

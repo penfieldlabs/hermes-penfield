@@ -86,6 +86,7 @@ class FakePenfield:
         #: Browser sign-ins by device code: ``pending``, ``approved`` or ``refused``.
         self.sign_ins: dict[str, dict[str, Any]] = {}
         self.clients: dict[str, str] = {}
+        self._registrations = 0
         self.device_code_lifetime = 600.0
         self.device_poll_interval = 0.0
         #: Decide a sign-in on its first poll, as a person with the page open would.
@@ -407,7 +408,9 @@ class FakePenfield:
         return tokens
 
     def _register(self, body: dict[str, Any]) -> dict[str, Any]:
-        client_id = f"client-{len(self.clients) + 1}"
+        # Never the id of an earlier registration, also after one is forgotten.
+        self._registrations += 1
+        client_id = f"client-{self._registrations}"
         self.clients[client_id] = str(body.get("scope") or "")
         return {"client_id": client_id, "scope": self.clients[client_id]}
 
@@ -428,7 +431,11 @@ class FakePenfield:
             return 200, self._register(r.body if isinstance(r.body, dict) else {})
         if (m, p) == ("POST", "/oauth/device_authorization"):
             if form.get("client_id") not in self.clients:
-                return 400, {"error": "invalid_client"}
+                return 401, {
+                    "error": "invalid_client",
+                    "error_description": "Unknown client, or the client is not registered "
+                    "for the device_code grant.",
+                }
             code = f"device-{len(self.sign_ins) + 1}"
             user_code = f"TEST-{len(self.sign_ins) + 1:04d}"
             self.sign_ins[code] = {
@@ -455,6 +462,8 @@ class FakePenfield:
         if (m, p) == ("POST", "/oauth/token"):
             if form.get("grant_type") == "refresh_token":
                 token = form.get("refresh_token", "")
+                if form.get("client_id") not in self.clients:
+                    return 401, {"error": "invalid_client", "error_description": "Invalid token"}
                 grant = self._refresh_grants.get(token, {})
                 if token not in self.valid_refresh_tokens or grant.get("client_id") != form.get(
                     "client_id"
@@ -511,7 +520,9 @@ class FakePenfield:
             return 422, _invalid("content", "Field required")
         if len(content) > 10_000:
             return 422, _invalid("content", "String should have at most 10000 characters")
-        return 201, _ok(_public(self._insert(body)))
+        if _too_many(body.get("tags")):
+            return 422, _invalid("tags", _TOO_MANY_TAGS.format(n=len(body["tags"])))
+        return 201, _ok(_public(self._insert({**body, "tags": _stored_tags(body.get("tags"))})))
 
     def _memory_by_id(
         self, method: str, memory_id: str, body: dict[str, Any]
@@ -522,9 +533,11 @@ class FakePenfield:
         if method == "GET":
             return 200, _ok(_public(mem))
         if method == "PUT":
+            if _too_many(body.get("tags")):
+                return 422, _invalid("tags", _TOO_MANY_TAGS.format(n=len(body["tags"])))
             for key in ("content", "importance", "tags"):
                 if key in body:
-                    mem[key] = body[key]
+                    mem[key] = _stored_tags(body[key]) if key == "tags" else body[key]
             return 200, _ok(_public(mem))
         if method == "DELETE":
             if not self.allow_memory_delete:
@@ -792,6 +805,31 @@ _READ_ONLY_POSTS = frozenset({"/search/hybrid", "/relationships/traverse", "/ana
 
 def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+_TOO_MANY_TAGS = "List should have at most 10 items after validation, not {n}"
+
+
+def _too_many(tags: Any) -> bool:
+    """Tell whether the API refuses the list: it counts the tags as written."""
+    return isinstance(tags, list) and len(tags) > 10
+
+
+def _stored_tags(tags: Any) -> list[str]:
+    """Return the tags the API keeps, in the form and the order it stores them.
+
+    Measured on the live API: lower case, spaces and underscores become
+    hyphens, anything but a-z, 0-9 and hyphens goes, hyphens are not
+    repeated and not kept at either end. A tag that ends up shorter than
+    2 or longer than 50 characters is not stored.
+    """
+    kept = set()
+    for tag in tags if isinstance(tags, list) else []:
+        text = re.sub(r"[^a-z0-9-]", "", re.sub(r"[ _]", "-", str(tag).strip().lower()))
+        text = re.sub(r"-+", "-", text).strip("-")
+        if 2 <= len(text) <= 50:
+            kept.add(text)
+    return sorted(kept)
 
 
 def _public(mem: dict[str, Any]) -> dict[str, Any]:

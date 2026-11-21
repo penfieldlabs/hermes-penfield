@@ -118,6 +118,20 @@ class TestSaveContext:
         assert payload["description"] == self.DESCRIPTION
         assert payload["memory_ids"] == [linked]
 
+    def test_a_name_that_cannot_be_a_tag_is_still_the_name(
+        self, api: FakePenfield, api_client: PenfieldClient
+    ) -> None:
+        """The name is also sent as a tag, where Penfield can store it as one."""
+        name = "Handoff: " + "n" * 60
+
+        result = _call(api_client, "penfield_save_context", name=name, description="Notes.")
+
+        (request,) = api.calls("POST", "/memories")
+        restored = _call(api_client, "penfield_restore_context", name=name)
+        assert request.body["tags"] == ["checkpoint", "context"]
+        assert json.loads(api.memories[result["context_id"]]["content"])["checkpoint_name"] == name
+        assert restored["name"] == name
+
     def test_links_memories_referenced_by_id(
         self, api: FakePenfield, api_client: PenfieldClient
     ) -> None:

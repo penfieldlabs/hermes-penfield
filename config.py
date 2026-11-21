@@ -310,3 +310,7 @@ class PenfieldConfig:
     def token_path(self, hermes_home: str | Path) -> Path:
         """Return the path used for cached JWT tokens."""
         return _penfield_dir(hermes_home) / "tokens.json"
+
+    def client_path(self, hermes_home: str | Path) -> Path:
+        """Return the path of the registration a profile keeps for browser sign-ins."""
+        return _penfield_dir(hermes_home) / "client.json"

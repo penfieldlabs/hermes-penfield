@@ -10,6 +10,7 @@ apart from one that only could not be renewed right now.
 from __future__ import annotations
 
 import json
+import stat
 import time
 from pathlib import Path
 
@@ -208,6 +209,209 @@ def test_a_new_sign_in_is_kept_when_the_earlier_one_cannot_be_ended(
     cfg = _config(api)
     client = PenfieldClient(PenfieldAuth(cfg, tmp_path), cfg, sleep=lambda _s: None)
     assert client.call("search_stats")["total_memories"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The registration a profile keeps
+# ---------------------------------------------------------------------------
+
+
+def _client_path(home: Path) -> Path:
+    return home / "penfield" / "client.json"
+
+
+def _kept(home: Path) -> dict[str, object]:
+    kept: dict[str, object] = json.loads(_client_path(home).read_text(encoding="utf-8"))
+    return kept
+
+
+def _sign_in(api: FakePenfield, home: Path, **options: str) -> None:
+    api.approve_sign_ins = True
+    PenfieldAuth(_config(api), home).device_code_flow(say=lambda _line: None, **options)
+
+
+def test_a_sign_in_registers_under_a_name_a_user_recognizes(
+    api: FakePenfield, tmp_path: Path
+) -> None:
+    """The name tells a person reading it at Penfield which program signed in."""
+    _sign_in(api, tmp_path)
+
+    (registration,) = api.calls("POST", "/oauth/register")
+    assert registration.body["client_name"] == "Hermes Agent (Penfield plugin)"
+
+
+def test_the_first_sign_in_keeps_its_registration(api: FakePenfield, tmp_path: Path) -> None:
+    _sign_in(api, tmp_path)
+
+    assert _kept(tmp_path) == {api.url: {"client_id": "client-1", "scope": SIGN_IN_SCOPE}}
+    assert stat.S_IMODE(_client_path(tmp_path).stat().st_mode) == 0o600
+    assert list(tmp_path.glob("penfield/.client-*")) == []
+
+
+def test_a_later_sign_in_uses_the_registration_the_profile_kept(
+    api: FakePenfield, tmp_path: Path
+) -> None:
+    _sign_in(api, tmp_path)
+    first = _saved(tmp_path)
+
+    _sign_in(api, tmp_path)
+
+    assert len(api.calls("POST", "/oauth/register")) == 1
+    assert _saved(tmp_path)["client_id"] == "client-1"
+    cfg = _config(api)
+    client = PenfieldClient(PenfieldAuth(cfg, tmp_path), cfg, sleep=lambda _s: None)
+    assert client.call("search_stats")["total_memories"] == 0, "the new sign-in works"
+    assert first["refresh_token"] not in api.valid_refresh_tokens, "the earlier one is ended"
+
+
+def test_a_sign_in_after_a_logout_uses_the_same_registration(
+    api: FakePenfield, tmp_path: Path
+) -> None:
+    _sign_in(api, tmp_path)
+    assert PenfieldAuth(_config(api), tmp_path).logout() is True
+
+    _sign_in(api, tmp_path)
+
+    assert len(api.calls("POST", "/oauth/register")) == 1
+
+
+def test_a_registration_the_server_no_longer_knows_is_replaced(
+    api: FakePenfield, tmp_path: Path
+) -> None:
+    _sign_in(api, tmp_path)
+    api.clients.clear()
+
+    _sign_in(api, tmp_path)
+
+    refused, accepted = api.calls("POST", "/oauth/device_authorization")[1:]
+    assert "client_id=client-1" in refused.body
+    assert "client_id=client-1" not in accepted.body
+    assert len(api.calls("POST", "/oauth/register")) == 2
+    kept = _kept(tmp_path)[api.url]
+    assert kept == {"client_id": _saved(tmp_path)["client_id"], "scope": SIGN_IN_SCOPE}
+    assert kept["client_id"] != "client-1"
+
+
+def test_another_refusal_is_reported_with_the_way_to_start_over(
+    api: FakePenfield, tmp_path: Path
+) -> None:
+    _sign_in(api, tmp_path)
+    api.fail_next[("POST", "/oauth/device_authorization")] = [400]
+
+    with pytest.raises(AuthError) as refused:
+        _sign_in(api, tmp_path)
+
+    assert refused.value.status == 400
+    assert f"delete {_client_path(tmp_path)} and sign in again" in str(refused.value)
+    assert len(api.calls("POST", "/oauth/register")) == 1
+    assert _kept(tmp_path)[api.url]["client_id"] == "client-1", "the registration stays"
+
+
+def test_deleting_the_kept_registration_starts_over(api: FakePenfield, tmp_path: Path) -> None:
+    _sign_in(api, tmp_path)
+    _client_path(tmp_path).unlink()
+
+    _sign_in(api, tmp_path)
+
+    assert _kept(tmp_path)[api.url]["client_id"] == "client-2"
+
+
+def test_a_refusal_of_a_first_registration_says_nothing_about_a_file(
+    api: FakePenfield, tmp_path: Path
+) -> None:
+    api.fail_next[("POST", "/oauth/device_authorization")] = [400]
+
+    with pytest.raises(AuthError) as refused:
+        _sign_in(api, tmp_path)
+
+    assert "client.json" not in str(refused.value)
+
+
+def test_a_server_that_fails_is_not_blamed_on_the_kept_registration(
+    api: FakePenfield, tmp_path: Path
+) -> None:
+    _sign_in(api, tmp_path)
+    api.fail_next[("POST", "/oauth/device_authorization")] = [503]
+
+    with pytest.raises(AuthTransportError) as failed:
+        _sign_in(api, tmp_path)
+
+    assert "client.json" not in str(failed.value)
+    assert len(api.calls("POST", "/oauth/register")) == 1
+
+
+def test_a_registration_is_kept_for_each_api_address(api: FakePenfield, tmp_path: Path) -> None:
+    elsewhere = {"client_id": "client-elsewhere", "scope": SIGN_IN_SCOPE}
+    _client_path(tmp_path).parent.mkdir(parents=True)
+    _client_path(tmp_path).write_text(json.dumps({"https://other.example/api/v2": elsewhere}))
+
+    _sign_in(api, tmp_path)
+
+    assert _kept(tmp_path) == {
+        "https://other.example/api/v2": elsewhere,
+        api.url: {"client_id": "client-1", "scope": SIGN_IN_SCOPE},
+    }
+
+
+def test_a_registration_made_for_other_permissions_is_not_used(
+    api: FakePenfield, tmp_path: Path
+) -> None:
+    """A client is registered for the scope it will ask for."""
+    older = api.sign_in("read write offline_access")["client_id"]
+    _client_path(tmp_path).parent.mkdir(parents=True)
+    _client_path(tmp_path).write_text(
+        json.dumps({api.url: {"client_id": older, "scope": "read write offline_access"}})
+    )
+
+    _sign_in(api, tmp_path)
+
+    assert len(api.calls("POST", "/oauth/register")) == 1
+    assert _kept(tmp_path)[api.url]["client_id"] not in {older, ""}
+
+
+def test_a_client_id_given_by_hand_is_used_and_not_kept(api: FakePenfield, tmp_path: Path) -> None:
+    by_hand = api.sign_in()["client_id"]
+
+    _sign_in(api, tmp_path, client_id=by_hand)
+
+    assert _saved(tmp_path)["client_id"] == by_hand
+    assert api.calls("POST", "/oauth/register") == []
+    assert not _client_path(tmp_path).exists()
+
+
+def test_a_client_id_given_by_hand_is_not_replaced_when_refused(
+    api: FakePenfield, tmp_path: Path
+) -> None:
+    with pytest.raises(AuthError):
+        _sign_in(api, tmp_path, client_id="no-such-client")
+
+    assert api.calls("POST", "/oauth/register") == []
+    assert len(api.calls("POST", "/oauth/device_authorization")) == 1
+
+
+@pytest.mark.parametrize("content", ["not json", "[]", '{"x": 1', "null", '{"%s": "client-1"}'])
+def test_a_registration_file_that_cannot_be_read_is_written_again(
+    api: FakePenfield, tmp_path: Path, content: str
+) -> None:
+    _client_path(tmp_path).parent.mkdir(parents=True)
+    _client_path(tmp_path).write_text(content.replace("%s", api.url))
+
+    _sign_in(api, tmp_path)
+
+    assert _kept(tmp_path)[api.url] == {"client_id": "client-1", "scope": SIGN_IN_SCOPE}
+
+
+def test_a_sign_in_goes_through_when_the_registration_cannot_be_kept(
+    api: FakePenfield, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _client_path(tmp_path).mkdir(parents=True)  # something is in the way of the file
+
+    with caplog.at_level("WARNING", logger="penfield"):
+        _sign_in(api, tmp_path)
+
+    assert _saved(tmp_path)["source"] == "oauth"
+    assert "could not keep the sign-in registration" in caplog.text
+    assert list(tmp_path.glob("penfield/.client-*")) == []
 
 
 # ---------------------------------------------------------------------------

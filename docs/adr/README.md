@@ -35,3 +35,5 @@ old one and the old one says so in its status line.
 | 25 | [A login ends only when the server says so](0025-a-login-ends-when-the-server-says-so.md) | Accepted |
 | 26 | [One door for HTTP](0026-one-door-for-http.md) | Accepted |
 | 27 | [Say why Penfield is off](0027-say-why-penfield-is-off.md) | Accepted |
+| 28 | [Refuse a tag Penfield does not store](0028-refuse-a-tag-penfield-does-not-store.md) | Accepted |
+| 29 | [One registration per profile](0029-one-registration-per-profile.md) | Accepted |

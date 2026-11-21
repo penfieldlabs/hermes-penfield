@@ -22,6 +22,9 @@ from .constants import (
     MEMORY_SOURCE_TYPES,
     RELATIONSHIP_TYPES,
     SEMANTIC_SEARCH_WEIGHTS,
+    TAG_MAX_CHARS,
+    TAG_MIN_CHARS,
+    TAGS_PER_MEMORY,
 )
 from .exceptions import NotFoundError, PenfieldError
 
@@ -60,6 +63,14 @@ def _enum_str(values: tuple[str, ...]) -> dict[str, list[str]]:
     return {"enum": sorted(values)}
 
 
+#: What a tool that writes tags tells the agent about them.
+TAGS_NOTE = (
+    f"Up to {TAGS_PER_MEMORY} tags. Penfield stores a tag in lower case, turns spaces and "
+    "underscores into hyphens and removes every other character that is not a-z, 0-9 or a "
+    f"hyphen. A tag left with fewer than {TAG_MIN_CHARS} or more than {TAG_MAX_CHARS} "
+    "characters is refused."
+)
+
 # ---------------------------------------------------------------------------
 # Tool schemas: the Penfield MCP tool list, with a penfield_ prefix
 # ---------------------------------------------------------------------------
@@ -91,7 +102,12 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "content": {"type": "string", "minLength": 1, "maxLength": 10000},
-                "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": TAGS_PER_MEMORY,
+                    "description": TAGS_NOTE,
+                },
                 "importance": {"type": "number", "minimum": 0, "maximum": 1},
             },
             "required": ["content"],
@@ -174,7 +190,12 @@ PENFIELD_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "memory_id": {"type": "string", "format": "uuid"},
                 "content": {"type": "string", "minLength": 1, "maxLength": 10000},
                 "importance": {"type": "number", "minimum": 0, "maximum": 1},
-                "tags": {"type": "array", "items": {"type": "string"}},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": TAGS_PER_MEMORY,
+                    "description": TAGS_NOTE,
+                },
             },
             "required": ["memory_id"],
         },
@@ -532,12 +553,65 @@ def _awaken(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
     return client.call("personality_awakening")
 
 
+def stored_tag(tag: str) -> str:
+    """Return ``tag`` the way Penfield stores it.
+
+    Lower case, spaces and underscores as hyphens, nothing but a-z, 0-9
+    and hyphens, no hyphen at either end and never two in a row.
+    """
+    text = _re.sub(r"[ _]", "-", tag.strip().lower())
+    text = _re.sub(r"[^a-z0-9-]", "", text)
+    return _re.sub(r"-{2,}", "-", text).strip("-")
+
+
+def _tag_problem(tag: str) -> str:
+    """Say why Penfield would not store ``tag``, or return ``""`` if it would."""
+    kept = len(stored_tag(tag))
+    if kept > TAG_MAX_CHARS:
+        return f"is too long: {kept} characters, and a tag can have at most {TAG_MAX_CHARS}"
+    if kept < TAG_MIN_CHARS:
+        return (
+            "would not be stored: a tag keeps its letters a to z, its digits and its "
+            f"hyphens, and at least {TAG_MIN_CHARS} characters have to remain"
+        )
+    return ""
+
+
+def _tags_to_send(args: dict[str, Any]) -> list[str]:
+    """Return the tags of a write, refusing what Penfield would not store.
+
+    Penfield does not store a tag outside its limits, so the agent is told
+    here, before anything is sent, and can correct it. A blank tag is what
+    a model sends when it means none, and is left out.
+
+    Raises:
+        ValueError: Naming the first such tag by its position in the list,
+            or saying that there are more tags than a memory can have.
+    """
+    tags = []
+    for position, tag in enumerate(args.get("tags") or (), 1):
+        if not tag.strip():
+            continue
+        problem = _tag_problem(tag)
+        if problem:
+            shown = tag if len(tag) <= 20 else f"{tag[:20]}..."
+            raise ValueError(f"tag {position} ({shown!r}) {problem}")
+        tags.append(tag)
+    if len(tags) > TAGS_PER_MEMORY:
+        raise ValueError(
+            f"{len(tags)} tags were given and a memory can have at most {TAGS_PER_MEMORY}"
+        )
+    return tags
+
+
 @_tool("penfield_store")
 def _store(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
     body: dict[str, Any] = {"content": str(args["content"])}
-    for key in ("tags", "importance"):
-        if key in args:
-            body[key] = args[key]
+    tags = _tags_to_send(args)
+    if tags:
+        body["tags"] = tags
+    if "importance" in args:
+        body["importance"] = args["importance"]
     return client.call("memory_create", body=body)
 
 
@@ -635,7 +709,10 @@ def _fetch(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
 @_tool("penfield_update_memory")
 def _update_memory(client: PenfieldClient, args: dict[str, Any]) -> dict[str, Any]:
     memory_id = args["memory_id"]
-    body: dict[str, Any] = {k: args[k] for k in ("content", "importance", "tags") if k in args}
+    body: dict[str, Any] = {k: args[k] for k in ("content", "importance") if k in args}
+    tags = _tags_to_send(args)
+    if tags:
+        body["tags"] = tags
     if not body:
         raise ValueError("penfield_update_memory requires at least one field to update")
     return client.call("memory_update", path_params={"memory_id": memory_id}, body=body)
@@ -831,13 +908,15 @@ def save_checkpoint(
         }
     )
 
+    # The name doubles as a tag where Penfield can store it as one.
+    name_tag = [] if _tag_problem(name) else [name]
     result = client.call(
         "memory_create",
         body={
             "content": content,
             "memory_type": "checkpoint",
             "importance": 0.9,
-            "tags": ["checkpoint", "context", name, *extra_tags],
+            "tags": ["checkpoint", "context", *name_tag, *extra_tags],
         },
     )
 
